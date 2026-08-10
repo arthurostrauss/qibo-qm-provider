@@ -24,6 +24,7 @@ dependencies = [
     "qibolab",
     "qibocal",
     "qiskit",
+    "qiskit-qm-provider>=0.3.3",
     "qualang-tools>=0.16.0",
     "quam>=0.4.1",
     "quam-builder@git+https://github.com/qua-platform/quam-builder.git@v0.4.0",
@@ -32,6 +33,15 @@ dependencies = [
     "openqasm3",
     "qiskit_qasm3_import",
 ]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.pytest.ini_options]
+markers = [
+    "iqcc: requires real IQCC cloud credentials/access (excluded by default; run with -m iqcc)",
+]
+addopts = "-m 'not iqcc'"
 
 [build-system]
 requires = ["hatchling"]
