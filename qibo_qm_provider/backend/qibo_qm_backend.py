@@ -125,11 +125,40 @@ class QiboQMBackend(NumpyBackend):
         argument) or qubit-pair (a 2-tuple) identified by ``qubits`` --
         resolved the same way ``get_qubit``/``get_qubit_pair`` already
         resolve int/str/object identifiers -- then calls ``update_target()``
-        so the new operation is immediately visible in ``natives`` and
-        reachable by ``execute_circuit``. ``macro`` is whatever the wrapped
-        backend already accepts as a qubit/pair macro: a ``quam.core.macro.
-        QuamMacro`` instance, or a bare callable taking the gate's own
-        parameters (matching how ``add_basic_macros``-installed macros work).
+        so the new operation is visible in ``natives``.
+
+        ``macro`` must be a ``quam.core.macro.QuamMacro`` instance (e.g. a
+        ``QubitMacro`` subclass) whose ``apply`` takes the gate's own
+        parameters. A **bare callable does not work**, contrary to what this
+        docstring previously claimed: ``QMBackend._populate_target`` reads
+        ``macro.apply`` unconditionally, so a plain function raises
+        ``AttributeError: 'function' object has no attribute 'apply'``
+        (verified). ``apply``'s arity must also match the number of parameters
+        the emitted operation carries, or compilation fails with
+        ``NumberOfParametersMismatch``.
+
+        .. warning::
+           **Registering a name that already exists may not reach the
+           compiler, depending on the installed ``qiskit-qm-provider``
+           version.** Root cause: ``qm_qasm.OperationIdentifier`` defines
+           neither ``__eq__`` nor ``__hash__``, so it falls back to Python's
+           default identity comparison -- two separately-constructed
+           ``OperationIdentifier("rz", 1, (0,))`` instances are never equal
+           (verified directly against qm-qasm 1.7.7). ``qiskit-qm-provider``
+           used to key its internal QUA-operation cache by these objects
+           directly, so re-populating an operation that already had an entry
+           silently added a second, functionally duplicate one instead of
+           overwriting it -- ``register_gate("rz", ...)`` on a machine that
+           already had an ``rz`` macro made the change visible in ``natives``
+           while ``quantum_circuit_to_qua`` kept calling the original
+           implementation. Fixed upstream (``qiskit_qm_provider.backend.
+           backend_utils.operation_key``, used throughout ``QMBackend``), but
+           only in source as of this writing -- this package's declared
+           dependency floor (``qiskit-qm-provider>=0.3.4``) predates the fix.
+           Until a release carrying it is available, the workaround remains:
+           install the macro on the QuAM machine *before* constructing the
+           backend, rather than via this method against an existing name.
+           Adding a genuinely new operation name is unaffected either way.
 
         This mutates the QuAM machine object itself (the same effect as
         setting ``qubit.macros[name] = macro`` by hand) -- it is not an

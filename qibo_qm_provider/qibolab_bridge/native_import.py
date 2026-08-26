@@ -8,18 +8,9 @@ any hand-written macro (via ``update_target()``). It is not a second
 execution path.
 
 Scope for this slice: single-qubit ``RX``/``RX90``/``MZ`` and two-qubit ``CZ``
-natives, for pulses whose envelope is ``Rectangular``, ``Gaussian``, or
-``Drag`` (the qibolab envelope kinds with a direct QuAM ``Pulse`` subclass
-equivalent). Other envelope kinds raise explicitly rather than being silently
-dropped or approximated.
-
-Qibolab's ``Pulse.amplitude`` is a dimensionless value normalized to roughly
-``[-1, 1]``, while QuAM ``Pulse`` amplitudes are in volts -- this importer
-does not attempt unit reconciliation; it passes the qibolab amplitude through
-as the QuAM pulse's amplitude field, so calibration data imported this way
-must already have been produced in volts (e.g. hand-populated
-``platform.natives`` for QM hardware), not assumed compatible across
-arbitrary Qibolab platforms without review.
+natives -- envelope conversion itself (all 7 qibolab envelope kinds) is
+handled by :mod:`qibo_qm_provider.qibolab_bridge._quam_pulses`, shared with
+the QuAM -> qibolab direction and with ``qua_macros.py``.
 
 Qubit/pair identity mapping: Qibolab ``QubitId``/``QubitPairId`` values are
 matched to QuAM qubit/pair names via ``str(qubit_id)``/``f"{c}-{t}"`` by
@@ -35,64 +26,22 @@ from typing import TYPE_CHECKING, Dict, Optional, Sequence
 
 from qibolab._core.pulses.pulse import Pulse as QibolabPulse
 from qibolab._core.pulses.pulse import Readout as QibolabReadout
-from quam.components.pulses import DragCosinePulse, GaussianPulse, Pulse as QuamPulse, SquarePulse
 from quam.core import QuamRoot
 from quam.core.macro import QuamMacro
+
+from ._quam_pulses import max_voltage_for_channel, quam_pulse_from_qibolab_pulse, quam_readout_pulse_from_qibolab_readout
+from .naming import (
+    SINGLE_QUBIT_MACRO_NAMES,
+    TWO_QUBIT_MACRO_NAMES,
+)
 
 if TYPE_CHECKING:
     import qibolab
 
 __all__ = ["import_qibolab_natives_as_macros"]
 
-# RX/RX90 map onto a plain drive Pulse; MZ (a Readout) only has its `.probe`
-# leg imported (best-effort: no integration-weight/kernel setup is attempted,
-# so an imported "measure" macro is not acquisition-complete on its own).
-# CZ's VirtualZ phase-compensation legs are skipped -- only the coupler's
-# flux Pulse leg is imported (see _install_native_as_macro's Pulse-only
-# filter below); a phase-accurate CZ macro is a follow-up, not this slice.
-_SINGLE_QUBIT_MACRO_NAMES = {"RX": "x", "RX90": "sx", "MZ": "measure"}
-_TWO_QUBIT_MACRO_NAMES = {"CZ": "cz"}
-
-_CHANNEL_SUFFIX_TO_ATTR = {
-    "drive": "xy",
-    "probe": "resonator",
-    "acquisition": "resonator",
-    "flux": "z",
-}
+_CHANNEL_SUFFIX_TO_ATTR = {"drive": "xy", "probe": "resonator", "acquisition": "resonator", "flux": "z"}
 _PAIR_CHANNEL_SUFFIX_TO_ATTR = {"flux": "coupler"}
-
-
-def _quam_pulse_from_qibolab_pulse(pulse: "qibolab.Pulse", name: str, anharmonicity: float = 0.0) -> QuamPulse:
-    """Build a QuAM ``Pulse`` matching one qibolab ``Pulse``'s envelope/duration/amplitude."""
-    kind = pulse.envelope.kind
-    if kind == "rectangular":
-        return SquarePulse(length=pulse.duration, amplitude=pulse.amplitude, id=name)
-    if kind == "gaussian":
-        return GaussianPulse(
-            length=pulse.duration,
-            amplitude=pulse.amplitude,
-            sigma=pulse.envelope.rel_sigma * pulse.duration,
-            id=name,
-        )
-    if kind == "drag":
-        # qibolab's `beta` and QuAM's `alpha` are both DRAG-scaling
-        # coefficients but are not verified to share the same sign/unit
-        # convention -- passed through as-is (best-effort, flagged here
-        # rather than silently assumed correct). `anharmonicity` is read off
-        # the target QuAM qubit when available (0.0, physically wrong for a
-        # real transmon, otherwise -- see caller).
-        return DragCosinePulse(
-            length=pulse.duration,
-            amplitude=pulse.amplitude,
-            alpha=pulse.envelope.beta,
-            anharmonicity=anharmonicity,
-            axis_angle=0.0,
-            id=name,
-        )
-    raise NotImplementedError(
-        f"Envelope kind {kind!r} (pulse {name!r}) has no QuAM Pulse equivalent supported by "
-        "this importer. Supported kinds: rectangular, gaussian, drag."
-    )
 
 
 def _install_native_as_macro(native, macro_name: str, target_component, name_prefix: str) -> Optional[QuamMacro]:
@@ -102,28 +51,22 @@ def _install_native_as_macro(native, macro_name: str, target_component, name_pre
     carries it.
 
     Only plain qibolab ``Pulse`` instructions are imported -- a ``Readout``
-    (as used by ``MZ``) contributes its ``.probe`` leg only (best-effort, no
-    integration-weight/kernel setup), and non-pulse instructions such as
-    ``VirtualZ`` (CZ's phase-compensation legs) are skipped with a warning
-    rather than raising, since they have no single-channel QuAM ``Pulse``
-    equivalent. Channels with no corresponding QuAM attribute on
-    ``target_component`` (e.g. a qubit-pair's coupler when absent) are
-    likewise skipped. Returns ``None`` (installs nothing) if no importable
-    leg was found.
+    (as used by ``MZ``) contributes its ``.probe`` leg only, and non-pulse
+    instructions such as ``VirtualZ`` (CZ's phase-compensation legs) are
+    skipped with a warning rather than raising, since they have no
+    single-channel QuAM ``Pulse`` equivalent. Channels with no corresponding
+    QuAM attribute on ``target_component`` (e.g. a qubit-pair's coupler when
+    absent) are likewise skipped. Returns ``None`` (installs nothing) if no
+    importable leg was found.
     """
     from quam.components.macro import PulseMacro
 
     is_pair = hasattr(target_component, "qubit_control")
     suffix_to_attr = _PAIR_CHANNEL_SUFFIX_TO_ATTR if is_pair else _CHANNEL_SUFFIX_TO_ATTR
-    anharmonicity = getattr(target_component, "anharmonicity", 0.0) or 0.0
 
     installed_pulse_name = None
     for channel_id, instruction in native:
-        if isinstance(instruction, QibolabReadout):
-            pulse = instruction.probe
-        elif isinstance(instruction, QibolabPulse):
-            pulse = instruction
-        else:
+        if not isinstance(instruction, (QibolabReadout, QibolabPulse)):
             warnings.warn(
                 f"Skipping non-pulse instruction {type(instruction).__name__!r} on "
                 f"channel {channel_id!r} while importing native {macro_name!r} -- "
@@ -138,7 +81,14 @@ def _install_native_as_macro(native, macro_name: str, target_component, name_pre
             continue
         channel = getattr(target_component, attr)
         pulse_name = f"{name_prefix}_{macro_name}"
-        channel.operations[pulse_name] = _quam_pulse_from_qibolab_pulse(pulse, pulse_name, anharmonicity)
+        max_voltage = max_voltage_for_channel(channel)
+
+        if isinstance(instruction, QibolabReadout):
+            channel.operations[pulse_name] = quam_readout_pulse_from_qibolab_readout(
+                instruction, pulse_name, max_voltage
+            )
+        else:
+            channel.operations[pulse_name] = quam_pulse_from_qibolab_pulse(instruction, pulse_name, max_voltage)
         installed_pulse_name = pulse_name
 
     if installed_pulse_name is None:
@@ -181,7 +131,7 @@ def import_qibolab_natives_as_macros(
         single_natives = platform.natives.single_qubit.get(qubit_id)
         if single_natives is None:
             continue
-        for native_field, macro_name in _SINGLE_QUBIT_MACRO_NAMES.items():
+        for native_field, macro_name in SINGLE_QUBIT_MACRO_NAMES.items():
             native = getattr(single_natives, native_field)
             if native is None:
                 continue
@@ -197,7 +147,7 @@ def import_qibolab_natives_as_macros(
         if quam_pair_name not in machine.qubit_pairs:
             continue
         quam_pair = machine.qubit_pairs[quam_pair_name]
-        for native_field, macro_name in _TWO_QUBIT_MACRO_NAMES.items():
+        for native_field, macro_name in TWO_QUBIT_MACRO_NAMES.items():
             native = getattr(two_natives, native_field)
             if native is None:
                 continue

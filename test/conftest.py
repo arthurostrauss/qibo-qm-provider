@@ -27,12 +27,14 @@ import warnings
 
 import pytest
 from quam.components.hardware import FrequencyConverter, LocalOscillator, Mixer
-from quam.components.pulses import SquarePulse
+from quam.components.ports.ports_containers import FEMPortsContainer
+from quam.components.pulses import SquarePulse, SquareReadoutPulse
 from quam_builder.architecture.superconducting.components.flux_line import FluxLine
 from quam_builder.architecture.superconducting.components.readout_resonator import (
     ReadoutResonatorIQ,
+    ReadoutResonatorMW,
 )
-from quam_builder.architecture.superconducting.components.xy_drive import XYDriveIQ
+from quam_builder.architecture.superconducting.components.xy_drive import XYDriveIQ, XYDriveMW
 from quam_builder.architecture.superconducting.qpu.flux_tunable_quam import FluxTunableQuam
 from quam_builder.architecture.superconducting.qubit.flux_tunable_transmon import (
     FluxTunableTransmon,
@@ -182,3 +184,154 @@ def add_basic_macros_installed(dummy_machine: FluxTunableQuam) -> FluxTunableQua
             pair.macros.pop("cz", None)
 
     return dummy_machine
+
+
+def _make_mw_fem_qubit(
+    machine: FluxTunableQuam,
+    name: str,
+    *,
+    drive_port_id: int,
+    flux_port_id: int,
+    shared_resonator_out,
+    shared_resonator_in,
+    intermediate_frequency_drive: float,
+    intermediate_frequency_resonator: float,
+    flux_filters: bool,
+) -> FluxTunableTransmon:
+    """Build a ``FluxTunableTransmon`` wired through real OPX1000 MW-FEM/
+    LF-FEM port objects (registered in ``machine.ports``, referenced from
+    channels the same way ``quam_builder``'s own wiring machinery does),
+    rather than ``dummy_machine``'s bare ``("con1", n)`` tuples.
+
+    Ports are created via ``machine.ports.get_mw_output``/etc (not embedded
+    directly as objects) and channels reference them via
+    ``port.get_reference()`` -- QuAM only allows one parent per component,
+    so two channels cannot directly share one embedded port object, but they
+    *can* share one reference string, which resolves transparently to the
+    same underlying port (verified: ``resonator_a.opx_output is
+    resonator_b.opx_output`` is ``True`` when both reference the same port).
+    This is what makes ``shared_resonator_out``/``shared_resonator_in``
+    actually produce multiplexed-readout wiring, not two independent ports
+    that happen to look alike.
+    """
+    drive_out = machine.ports.get_mw_output(
+        "con1", 1, drive_port_id, create=True, band=2, upconverter_frequency=5.0e9, full_scale_power_dbm=-11
+    )
+    xy = XYDriveMW(
+        opx_output=drive_out.get_reference(),
+        intermediate_frequency=intermediate_frequency_drive,
+        operations={
+            "x180": SquarePulse(length=40, amplitude=0.1),
+            "x90": SquarePulse(length=40, amplitude=0.05),
+            "y90": SquarePulse(length=40, amplitude=0.05),
+            "-y90": SquarePulse(length=40, amplitude=-0.05),
+        },
+    )
+    resonator = ReadoutResonatorMW(
+        opx_output=shared_resonator_out.get_reference(),
+        opx_input=shared_resonator_in.get_reference(),
+        intermediate_frequency=intermediate_frequency_resonator,
+        time_of_flight=372,
+        smearing=0,
+        operations={
+            "readout": SquareReadoutPulse(
+                length=1000, amplitude=0.05, threshold=0.001, integration_weights_angle=1.2
+            )
+        },
+    )
+    flux_kwargs = {}
+    if flux_filters:
+        # Both a raw FIR (feedforward_filter) and exponential terms present
+        # at once -- exercises the filter-loss warning in _quam_wiring, the
+        # same shape found on every real arbel flux port.
+        flux_kwargs = dict(
+            exponential_filter=[(-0.0089, 100.0), (0.0071, 3512.0)],
+            feedforward_filter=[0.97, 0.36, -0.18, -0.10],
+            delay=61,
+        )
+    flux_out = machine.ports.get_analog_output(
+        "con1", 5, flux_port_id, create=True, output_mode="direct", sampling_rate=1e9, upsampling_mode="pulse", **flux_kwargs
+    )
+    z = FluxLine(
+        opx_output=flux_out.get_reference(),
+        flux_point="joint",
+        joint_offset=0.05,
+        operations={"const": SquarePulse(length=40, amplitude=0.1)},
+    )
+    qubit = FluxTunableTransmon(id=name, xy=xy, resonator=resonator, z=z)
+
+    # A "measure" macro pointing at the "readout" pulse, matching what
+    # add_basic_macros installs on real hardware -- _quam_wiring resolves
+    # the acquisition channel's threshold/iq_angle through this macro (not a
+    # hardcoded pulse name), so wiring tests that check those fields need it
+    # present. Imported lazily, matching this codebase's existing convention
+    # for qiskit_qm_provider-adjacent code.
+    from qiskit_qm_provider.quam_macros.superconducting.single_qubit_macros import MeasureMacro
+
+    qubit.macros["measure"] = MeasureMacro(pulse="readout")
+    return qubit
+
+
+@pytest.fixture
+def mw_fem_machine() -> FluxTunableQuam:
+    """A ``FluxTunableQuam`` wired through real OPX1000 MW-FEM (drive/probe/
+    acquisition) and LF-FEM (flux) port objects -- the only fixture in this
+    suite that can exercise ``_quam_wiring.build_qm_wiring``'s MW-FEM path;
+    ``dummy_machine`` is Octave-less IQ (``XYDriveIQ``/``ReadoutResonatorIQ``)
+    with bare ``("con1", n)`` tuple ports and cannot.
+
+    Mirrors the real ``"arbel"`` machine's shape at minimum size:
+
+    - ``mw0``/``mw1``'s resonators share **one** physical MW-FEM output/
+      input port (``con1/1/1``) -- the multiplexed-readout case (up to 6
+      qubits per port on real hardware), each with its own
+      ``intermediate_frequency``.
+    - ``mw0``'s flux port carries both ``exponential_filter`` and
+      ``feedforward_filter`` (the lossy case) and a non-zero ``delay``;
+      ``mw1``'s does not, so the filter-loss warning is exercised on exactly
+      one qubit's flux channel, not both.
+    - ``flux_point="joint"`` with a non-zero ``joint_offset`` on both, so the
+      static-offset-from-flux-point behavior is exercised.
+    - ``network`` deliberately carries no ``"port"`` entry, covering
+      ``_build_qm_controller``'s synthesized-cluster-port path.
+
+    No qubit pairs/couplers -- coupler-flux wiring reuses the same
+    ``_wire_flux`` code path already exercised by qubit flux, so a separate
+    coupler fixture would test no new code.
+    """
+    machine = FluxTunableQuam()
+    machine.network = {"host": "1.2.3.4", "cluster_name": "test-cluster"}
+    machine.ports = FEMPortsContainer()
+
+    shared_resonator_out = machine.ports.get_mw_output(
+        "con1", 1, 1, create=True, band=2, upconverter_frequency=7.0e9, full_scale_power_dbm=-2
+    )
+    shared_resonator_in = machine.ports.get_mw_input("con1", 1, 1, create=True, band=2, downconverter_frequency=7.0e9)
+
+    machine.qubits["mw0"] = _make_mw_fem_qubit(
+        machine,
+        "mw0",
+        drive_port_id=2,
+        flux_port_id=1,
+        shared_resonator_out=shared_resonator_out,
+        shared_resonator_in=shared_resonator_in,
+        intermediate_frequency_drive=100e6,
+        intermediate_frequency_resonator=50e6,
+        flux_filters=True,
+    )
+    machine.qubits["mw1"] = _make_mw_fem_qubit(
+        machine,
+        "mw1",
+        drive_port_id=3,
+        flux_port_id=2,
+        shared_resonator_out=shared_resonator_out,
+        shared_resonator_in=shared_resonator_in,
+        intermediate_frequency_drive=110e6,
+        intermediate_frequency_resonator=-30e6,
+        flux_filters=False,
+    )
+
+    machine.active_qubit_names = ["mw0", "mw1"]
+    machine.active_qubit_pair_names = []
+
+    return machine
