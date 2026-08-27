@@ -9,6 +9,8 @@ called out explicitly rather than by silently editing history.
 
 | Date | Slice | Section |
 |---|---|---|
+| 2026-08-27 | Real "arbel" `CZ` failure root-caused to directional connectivity and no `wire_names` support; both fixed | [Two-qubit connectivity direction: `wire_names` support and a real "arbel" bug, found and fixed](#two-qubit-connectivity-direction-wire_names-support-and-a-real-arbel-bug-found-and-fixed-2026-08-27) |
+| 2026-08-27 | `QiboQMBackend.circuit_to_qua`; symbolic `execute_circuit` now refuses explicitly; machine-level parameter/gate-name collision check; `fixed`-overflow bound corrected | [Slice 2: `circuit_to_qua` and its loose ends](#slice-2-circuit_to_qua-and-its-loose-ends-2026-08-27) |
 | 2026-08-26 | Gate renaming eliminated at the source; `qiskit-qm-provider` `OperationIdentifier` bug root-caused and fixed upstream | [Gate renaming and an upstream `qiskit-qm-provider` fix](#gate-renaming-and-an-upstream-qiskit-qm-provider-fix-2026-08-26) |
 | 2026-08-26 | Symbolic (sympy-parameter) Qibo-circuit → QUA lowering; bug #3 closed | [Symbolic Qibo-circuit lowering](#symbolic-qibo-circuit-lowering-2026-08-26) |
 | 2026-08-24 | `sequence_to_qua_macro`/`circuit_to_qua_macro`; revised target architecture | `QiboQMPlatformBackend` |
@@ -27,6 +29,132 @@ Companion documents: `symbolic_circuit_lowering.md` (the 2026-08-26 path, in
 depth, plus the findings and compromises behind it), `slice2_plan.md` (what is
 next for it), `qibo_backend_vs_qibolab_platform.md`,
 `qibolab_platform_from_quam_plan.md`, `qibocal_multi_qubit_handling.md`.
+
+## Two-qubit connectivity direction: `wire_names` support and a real "arbel" bug, found and fixed (2026-08-27)
+
+Found while re-verifying slice 2's live-hardware item against real `"arbel"`
+(a bare `X(0); CZ(0,1); M(0,1)` circuit): `qm_qasm.compiler.CompilationException:
+Pass "Qua1GenerationPass" failed`, wrapping
+`qm_qasm...UnresolvableOperation: Not found relevant operation for
+<OperationCandidate>` — unrelated to slice 2 itself (the failure is in the
+pre-existing `execute_circuit` → `QMBackend.run()` path), but real and
+worth root-causing rather than working around.
+
+**Root cause, traced to source and confirmed against live `"arbel"` data:**
+
+1. `circuit.wire_names` (Qibo's own logical-index → physical-qubit-name
+   channel) was **never consulted anywhere in this package**, nor by
+   `Circuit.to_qasm()` itself — confirmed empirically (identical OpenQASM2
+   output with or without it) and at the source (`qibo/models/circuit.py`).
+   So a Qibo circuit's plain integer index `i` always became Qiskit index
+   `i`, with zero way for a caller to say which physical qubit that meant.
+2. `qiskit_qm_provider.QMBackend` gives that same index its own, unrelated
+   meaning: `self._qubit_dict = {qubit.name: i for i, qubit in
+   enumerate(machine.active_qubits)}` (`qm_backend.py:169`) — position in
+   the QuAM machine's `active_qubit_names` list, nothing Qibo-side.
+3. `_populate_target` registers a two-qubit macro (e.g. `cz`) under exactly
+   **one** ordered `(control_index, target_index)` tuple, taken from the
+   QuAM `QubitPair`'s own `qubit_control`/`qubit_target` fields
+   (`qm_backend.py:474-490`) — never the reverse. `qm_qasm`'s own qubit
+   matching (`RegularQubitsPattern`/`ExactQubitPattern`) is a strict
+   positional zip with no symmetric fallback anywhere in the compiled
+   source either.
+4. On real `"arbel"`: `qA1→0`, `qA2→1`, and the **only** registered pair is
+   `qA2-qA1 → (1, 0)` — every active pair has `moving_qubit="control"`
+   (the flux pulse genuinely only plays on one physical qubit), so `CZ(0,1)`
+   and `CZ(1,0)` are not interchangeable, and the direction the failing
+   circuit used was never installed.
+
+Qibo's own transpiler doesn't help here either: `Placer`/`Router`/`Passes`
+are entirely opt-in (never invoked by `Backend.execute_circuit`), and even
+`assert_connectivity` only checks *unordered* adjacency on a plain
+`networkx.Graph` — Qibo's connectivity model has no concept of an
+asymmetric two-qubit gate at all. `QiboQMPlatformBackend` (the qibolab-native
+sibling) doesn't share this gap: qibolab's own `Compiler.get_sequence` already
+reads `wire_names[q] for q in gate.qubits`, order-preserving.
+
+**Fixed**, in `circuit_conversion.py`:
+
+- `qibo_circuit_to_qiskit(circuit, qubit_dict=...)` now resolves
+  `circuit.wire_names` (when set to physical qubit names) against a
+  `qubit_dict` (e.g. `QMBackend.qubit_dict`) to remap qubit indices — a
+  no-op when `qubit_dict` is omitted or `wire_names` is unset, so every
+  existing caller (including plain `qibo_circuit_to_qiskit(circuit)` with no
+  backend) is unaffected.
+- `validate_two_qubit_connectivity(qc, qubit_pair_dict, qubit_dict=None)` — a
+  new check, called from both `QiboQMBackend.circuit_to_qua` and
+  `execute_circuit` right after conversion, before compiling/running.
+  Raises the new `UnsupportedConnectivityError`, naming the exact reversed
+  direction that *is* installed when only the order is wrong, rather than
+  letting the opaque `CompilationException`/`UnresolvableOperation` surface
+  from deep inside `qm_qasm`.
+
+**Verified against real `"arbel"`, not just the offline fixture**: the
+original failing circuit (`CZ(0,1)`) now raises
+`UnsupportedConnectivityError: cz(qA1, qA2) has no registered connectivity
+in this direction -- the installed macro only supports cz(qA2, qA1)...`;
+switching to `CZ(1,0)` (the actually-calibrated direction) compiles and
+**executes successfully end to end** (`test/test_iqcc_integration.py::
+test_execute_circuit_on_real_hardware`, fixed to use the correct direction,
+now passes live). Unit coverage in `test/test_circuit_conversion.py` (13
+new tests: `wire_names` resolution, unknown-qubit rejection, and
+`validate_two_qubit_connectivity`'s accept/reject/unconnected/ignore-measure
+cases) and `test/test_qibo_qm_backend.py` (valid direction, reversed
+direction, `execute_circuit`'s same check, and `wire_names` flipping which
+physical direction a circuit addresses) — all against the synthetic
+`add_basic_macros_installed` fixture, whose `"q0-q1"` pair has the same
+asymmetric-registration shape as real `"arbel"`.
+
+**Still true, and now precisely documented rather than merely implicit**:
+without an explicit `wire_names`, Qibo qubit index `i` addresses
+`machine.active_qubit_names[i]` — a caller who cares which physical qubit a
+circuit targets should set `wire_names` explicitly rather than relying on
+that ordering.
+
+## Slice 2: `circuit_to_qua` and its loose ends (2026-08-27)
+
+Closes out `slice2_plan.md`'s remaining items on top of the 2026-08-26
+symbolic-lowering slice. Full detail in `slice2_plan.md` (see its own status
+note at the top) and this package's own docstrings; this section is the
+status summary.
+
+- **`QiboQMBackend.circuit_to_qua(circuit, *, input_type=None, param_table=None)`**
+  — the one-call entry point the previous slice deliberately left out.
+  Converts the circuit exactly once, builds a table from that same object
+  unless one is supplied (for the several-circuits-sharing-one-table case),
+  and delegates to `QMBackend.quantum_circuit_to_qua` unchanged.
+- **`execute_circuit` now refuses a symbolic circuit explicitly**, naming
+  `circuit_to_qua` as the alternative, rather than compiling with an unbound
+  parameter table. `MeasurementOutcomes` presupposes one concrete circuit and
+  shot count, which a symbolic circuit has no single instance of.
+- **The parameter/gate-name collision check closed to machine scope.** Slice 1
+  only checked a parameter name against the operations the *current circuit*
+  emits (`gate_map`-derived), a documented lower bound. `circuit_to_qua` now
+  also checks every parameter name against
+  `self.qiskit_backend.qm_qasm_basis_gates` — the full machine `Target` — so a
+  name colliding with a macro installed on the machine but unused by this
+  particular circuit is caught too, reusing the same `validate_symbol_name`/
+  `UnsupportedParameterError` machinery rather than duplicating it.
+- **The `fixed`-overflow bound corrected, not just decided.** `symbolic_
+  circuit_lowering.md` and `QiboParameterTable`'s docstring both stated QUA
+  `fixed` covers `[-2, 2)`; verified directly against `qm.qua.declare`'s own
+  docstring and `qiskit_qm_provider.fixed_point.FixedPoint` that the real
+  bound is `[-8, 8)` (a signed 4.28 fixed-point number) — `[-2, 2)` is
+  actually the unrelated `amplitude_scale` convention for `play`/`measure`.
+  A single 0–2π sweep already fits inside the real bound without
+  pre-scaling; only a composite expression (e.g. `2*theta + phi`) or a
+  multi-turn sweep can still exceed it. Documentation fixed to the correct
+  bound; a turns-valued-parameter flag (folding `2π` into the gate expression
+  to sidestep this entirely) is deferred to slice 3, since there is no live
+  circuit yet whose expression needs it.
+- **README** now states the two-backend split plainly, with a working
+  `circuit_to_qua` example — previously only `INTEGRATION_STATUS.md`/
+  `symbolic_circuit_lowering.md` carried this.
+- **Not done this slice:** the live-hardware validation item (a symbolic
+  `RZ` swept via `circuit_to_qua` against real `"arbel"`, confirming the
+  sweep happens inside one compiled program) — no IQCC credentials
+  available in this session. Left explicitly open, same convention as
+  other not-yet-hardware-validated items in this document.
 
 ## Gate renaming and an upstream `qiskit-qm-provider` fix (2026-08-26)
 

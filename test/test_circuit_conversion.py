@@ -2,9 +2,13 @@
 
 import pytest
 from qibo import Circuit, gates
+from qiskit.circuit import QuantumCircuit
 
-from qibo_qm_provider.backend.circuit_conversion import qibo_circuit_to_qiskit
-from qibo_qm_provider.exceptions import UnsupportedGateError
+from qibo_qm_provider.backend.circuit_conversion import (
+    qibo_circuit_to_qiskit,
+    validate_two_qubit_connectivity,
+)
+from qibo_qm_provider.exceptions import UnsupportedConnectivityError, UnsupportedGateError
 
 
 def test_basic_gate_conversion():
@@ -103,3 +107,113 @@ def test_align_gate_is_explicitly_unsupported():
 
     with pytest.raises(UnsupportedGateError):
         qibo_circuit_to_qiskit(circuit)
+
+
+# --------------------------------------------------------------------------- #
+# wire_names resolution
+#
+# Root-caused by a real "arbel" live-hardware failure (UnresolvableOperation
+# compiling CZ(0,1)): Circuit.to_qasm() never consults circuit.wire_names at
+# all (verified against qibo 0.3.3 source), so this package previously passed
+# Qibo's plain gate.qubits straight through with no way for a caller to
+# route logical qubits onto specific physical ones.
+# --------------------------------------------------------------------------- #
+
+
+def test_qubit_dict_none_is_identity_even_with_wire_names_set():
+    """The default (qubit_dict=None, e.g. every call not going through
+    QiboQMBackend) must behave exactly as before wire_names support existed:
+    plain gate.qubits, unaffected by whatever wire_names happens to be set."""
+    circuit = Circuit(2, wire_names=["q1", "q0"])
+    circuit.add(gates.X(0))
+
+    qc = qibo_circuit_to_qiskit(circuit)
+
+    x_instr = next(instr for instr in qc.data if instr.operation.name == "x")
+    assert qc.find_bit(x_instr.qubits[0]).index == 0
+
+
+def test_default_wire_names_is_identity_even_with_qubit_dict_given():
+    """Qibo's own default wire_names is list(range(nqubits)) -- with no
+    explicit remap requested, a qubit_dict must not change anything either."""
+    circuit = Circuit(2)
+    circuit.add(gates.X(0))
+
+    qc = qibo_circuit_to_qiskit(circuit, qubit_dict={"q0": 0, "q1": 1})
+
+    x_instr = next(instr for instr in qc.data if instr.operation.name == "x")
+    assert qc.find_bit(x_instr.qubits[0]).index == 0
+
+
+def test_wire_names_remaps_qubit_indices_via_qubit_dict():
+    """circuit.wire_names=["q1","q0"] means logical qubit 0 IS "q1" -- so a
+    gate written for logical qubit 0 must land on qubit_dict["q1"]."""
+    circuit = Circuit(2, wire_names=["q1", "q0"])
+    circuit.add(gates.X(0))
+    circuit.add(gates.M(0, 1))
+
+    qc = qibo_circuit_to_qiskit(circuit, qubit_dict={"q0": 0, "q1": 1})
+
+    x_instr = next(instr for instr in qc.data if instr.operation.name == "x")
+    assert qc.find_bit(x_instr.qubits[0]).index == 1
+
+
+def test_wire_names_unknown_qubit_raises_value_error():
+    circuit = Circuit(1, wire_names=["ghost"])
+    circuit.add(gates.X(0))
+
+    with pytest.raises(ValueError, match="ghost"):
+        qibo_circuit_to_qiskit(circuit, qubit_dict={"q0": 0})
+
+
+# --------------------------------------------------------------------------- #
+# validate_two_qubit_connectivity
+#
+# qm_qasm registers a two-qubit macro under exactly one ordered
+# (control_index, target_index) pair (verified against qiskit_qm_provider's
+# _populate_target and qm_qasm's own qubit-pattern matching, both exact,
+# order-sensitive, with no symmetric fallback) -- many QM two-qubit natives
+# (e.g. a flux-tunable CZ) really are physically asymmetric.
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_two_qubit_connectivity_accepts_registered_direction():
+    qc = QuantumCircuit(2)
+    qc.cz(0, 1)
+
+    validate_two_qubit_connectivity(qc, qubit_pair_dict={"q0-q1": (0, 1)})  # must not raise
+
+
+def test_validate_two_qubit_connectivity_rejects_reversed_direction():
+    qc = QuantumCircuit(2)
+    qc.cz(1, 0)
+
+    with pytest.raises(UnsupportedConnectivityError, match="cz"):
+        validate_two_qubit_connectivity(qc, qubit_pair_dict={"q0-q1": (0, 1)})
+
+
+def test_validate_two_qubit_connectivity_names_qubits_when_qubit_dict_given():
+    qc = QuantumCircuit(2)
+    qc.cz(1, 0)
+
+    with pytest.raises(UnsupportedConnectivityError, match=r"cz\(q1, q0\).*cz\(q0, q1\)"):
+        validate_two_qubit_connectivity(
+            qc, qubit_pair_dict={"q0-q1": (0, 1)}, qubit_dict={"q0": 0, "q1": 1}
+        )
+
+
+def test_validate_two_qubit_connectivity_rejects_unconnected_pair():
+    qc = QuantumCircuit(3)
+    qc.cz(0, 2)
+
+    with pytest.raises(UnsupportedConnectivityError, match="either direction"):
+        validate_two_qubit_connectivity(qc, qubit_pair_dict={"q0-q1": (0, 1)})
+
+
+def test_validate_two_qubit_connectivity_ignores_measure_and_single_qubit_gates():
+    qc = QuantumCircuit(2, 2)
+    qc.x(0)
+    qc.measure(0, 0)
+    qc.measure(1, 1)
+
+    validate_two_qubit_connectivity(qc, qubit_pair_dict={})  # must not raise

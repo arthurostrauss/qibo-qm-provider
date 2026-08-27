@@ -22,11 +22,14 @@ from qibo.config import raise_error
 from qibo.models import Circuit as QiboCircuit
 from qibo.result import MeasurementOutcomes
 from qiskit_qm_provider.backend.qm_backend import QMBackend
-from qiskit_qm_provider.parameter_table import InputType
+from qiskit_qm_provider.backend.qua_circuit_compilation import QuaCircuitCompilation
+from qiskit_qm_provider.parameter_table import InputType, Parameter, ParameterTable
 from quam.core import QuamRoot
 
-from .circuit_conversion import qibo_circuit_to_qiskit
+from .circuit_conversion import qibo_circuit_to_qiskit, validate_two_qubit_connectivity
 from .measurement_translation import translate_measurements
+from .parameter_table import QiboParameterTable
+from .symbolic_parameters import circuit_has_symbols, validate_symbol_name
 
 try:
     from qm import QuantumMachinesManager
@@ -188,6 +191,72 @@ class QiboQMBackend(NumpyBackend):
             "QiboQMBackend cannot apply gates directly; it executes circuits on QM hardware.",
         )
 
+    def circuit_to_qua(
+        self,
+        circuit: QiboCircuit,
+        *,
+        input_type: Optional[InputType] = None,
+        param_table: Optional[Union[ParameterTable, List[Union[ParameterTable, Parameter]], dict]] = None,
+    ) -> QuaCircuitCompilation:
+        """Compile a Qibo circuit to QUA, once, with its symbolic parameters
+        (if any) bound to a real-time parameter table.
+
+        The Qibo-facing counterpart of
+        ``qiskit_qm_provider.QMBackend.quantum_circuit_to_qua`` -- unlike
+        ``execute_circuit``, this accepts a circuit with symbolic (``sympy``)
+        gate parameters, since it returns the compiled QUA program directly
+        rather than a fixed-shot-count ``MeasurementOutcomes``.
+
+        Converts ``circuit`` to a Qiskit ``QuantumCircuit`` exactly once and
+        builds ``param_table`` from that same object, rather than the two
+        Qibo->Qiskit conversions a caller composing ``QiboParameterTable.
+        from_qibo_circuit`` and ``qibo_circuit_to_qiskit`` separately would
+        otherwise perform.
+
+        Args:
+            circuit: A Qibo circuit, symbolic or concrete.
+            input_type: Forwarded to ``QiboParameterTable.from_qiskit`` when
+                ``param_table`` is not supplied. Ignored if ``param_table`` is
+                given.
+            param_table: An already-built parameter table (or bare
+                ``Parameter``/sequence/dict), for the case where several
+                circuits share one table so that one set of QUA variables
+                drives all of them. When omitted, a table is built from
+                ``circuit``'s own symbolic parameters (``None`` if it has
+                none).
+
+        Returns:
+            The upstream ``QuaCircuitCompilation`` unchanged -- it already
+            carries ``.qua_program`` and the wired measurement outputs.
+
+        Raises:
+            UnsupportedParameterError: If a parameter name collides with an
+                operation installed on the wrapped machine (checked against
+                ``self.qiskit_backend.qm_qasm_basis_gates``, the full machine
+                ``Target`` -- a precise version of the lower-bound check
+                already applied when the circuit itself was converted, which
+                only knows the operations *this circuit* emits).
+            UnsupportedConnectivityError: If a two-qubit gate addresses a
+                physical qubit pair with no registered connectivity in that
+                direction (many QM two-qubit natives are physically
+                asymmetric). Set ``circuit.wire_names`` to route logical
+                qubits onto the physical qubits/direction that is actually
+                calibrated -- see :func:`~qibo_qm_provider.backend.
+                circuit_conversion.qibo_circuit_to_qiskit`.
+        """
+        qubit_dict = self._qiskit_backend.qubit_dict
+        qc = qibo_circuit_to_qiskit(circuit, qubit_dict=qubit_dict)
+        validate_two_qubit_connectivity(qc, self._qiskit_backend.qubit_pair_dict, qubit_dict)
+        table = (
+            param_table
+            if param_table is not None
+            else QiboParameterTable.from_qiskit(qc, input_type=input_type)
+        )
+        basis_gates = frozenset(self._qiskit_backend.qm_qasm_basis_gates)
+        for parameter in qc.parameters:
+            validate_symbol_name(parameter.name, forbidden_names=basis_gates)
+        return self._qiskit_backend.quantum_circuit_to_qua(qc, table)
+
     def execute_circuit(
         self,
         circuit: QiboCircuit,
@@ -198,8 +267,19 @@ class QiboQMBackend(NumpyBackend):
             return self.execute_circuit(initial_state + circuit, nshots=nshots)
         if initial_state is not None:
             raise_error(ValueError, "QiboQMBackend only supports circuits as initial states.")
+        if circuit_has_symbols(circuit):
+            raise_error(
+                ValueError,
+                "QiboQMBackend.execute_circuit does not support a circuit with "
+                "symbolic parameters -- it returns MeasurementOutcomes, which "
+                "presupposes one concrete circuit and shot count. Bind the "
+                "parameters first (circuit.set_parameters(...)), or use "
+                "circuit_to_qua(circuit) directly for real-time parameterization.",
+            )
 
-        qc = qibo_circuit_to_qiskit(circuit)
+        qubit_dict = self._qiskit_backend.qubit_dict
+        qc = qibo_circuit_to_qiskit(circuit, qubit_dict=qubit_dict)
+        validate_two_qubit_connectivity(qc, self._qiskit_backend.qubit_pair_dict, qubit_dict)
         job = self._qiskit_backend.run(qc, shots=nshots, memory=True)
         result = job.result()
 

@@ -51,15 +51,23 @@ class QiboParameterTable(ParameterTable):
     ``from_qiskit``'s own typing choice for circuit parameters.
 
     .. warning::
-       QUA's ``fixed`` type covers roughly ``[-2, 2)``. Qibo gate angles are in
-       **radians**, so any angle beyond about 2 rad overflows. This is not
-       introduced here -- ``from_qiskit`` types circuit parameters the same way
-       -- but it bites harder for angles than for the amplitudes ``fixed`` was
-       chosen for. Note in particular that
-       ``qiskit_qm_provider``'s ``VirtualZMacro`` divides by ``2*pi`` *inside*
-       QUA, so the overflow happens before the division, not after. Sweeping an
-       angle over a full turn needs the value pre-scaled to turns on the host
-       side.
+       QUA's ``fixed`` type is a signed 4.28 fixed-point number, covering
+       ``[-8, 8)`` -- *not* ``[-2, 2)``, which is a different, narrower QUA
+       convention (the valid ``amplitude_scale`` range for ``play``/
+       ``measure``). A single Qibo angle sweep over one full turn
+       (``0`` to ``2*pi`` rad, roughly ``6.28``) fits inside ``[-8, 8)``
+       without any pre-scaling. The real risk is a **composite** expression
+       -- e.g. ``2*theta + phi``, or a sweep spanning more than ~1.27 turns --
+       whose value can exceed ``8`` even when each symbol individually stays
+       within range. This is not introduced here -- ``from_qiskit`` types
+       circuit parameters the same way -- but it bites harder for angles than
+       for the amplitudes ``fixed`` was chosen for. Note in particular that
+       ``qiskit_qm_provider``'s ``VirtualZMacro`` calls ``frame_rotation``
+       (which divides by ``2*pi`` *inside* QUA, via ``frame_rotation_2pi``),
+       not ``frame_rotation_2pi`` directly, so the overflow happens before
+       that division, not after -- ``frame_rotation_2pi``'s own automatic
+       ``2*pi`` wrap-around never gets a chance to apply to an angle that
+       already overflowed ``[-8, 8)`` as a bare radian value.
     """
 
     @classmethod

@@ -1,4 +1,4 @@
-"""Tests for qibo_qm_provider.qibolab_bridge.pulse_sequence_import.
+"""Tests for qibo_qm_provider.qibolab_bridge.native_import.
 
 Uses qibolab's own ``create_platform("dummy")`` (a real, calibrated 5-qubit
 platform shipped by qibolab for testing) as a realistic source of natives,

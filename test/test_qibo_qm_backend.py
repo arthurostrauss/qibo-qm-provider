@@ -5,8 +5,10 @@ lazy-connection properties are never touched by these tests).
 """
 
 import pytest
+import sympy as sp
 
-from qibo_qm_provider import QiboQMBackend
+from qibo_qm_provider import QiboParameterTable, QiboQMBackend
+from qibo_qm_provider.exceptions import UnsupportedConnectivityError, UnsupportedParameterError
 
 
 @pytest.fixture
@@ -73,6 +75,176 @@ def test_execute_circuit_rejects_non_circuit_initial_state(backend):
     circuit.add(gates.M(0))
     with pytest.raises(ValueError):
         backend.execute_circuit(circuit, initial_state=[0, 1])
+
+
+def test_execute_circuit_rejects_symbolic_circuit(add_basic_macros_installed):
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    circuit = Circuit(1)
+    circuit.add(gates.RZ(0, theta=sp.Symbol("theta")))
+
+    with pytest.raises(ValueError, match="circuit_to_qua"):
+        backend.execute_circuit(circuit)
+
+
+# --------------------------------------------------------------------------- #
+# circuit_to_qua
+# --------------------------------------------------------------------------- #
+
+
+def test_circuit_to_qua_builds_table_and_compiles_once(add_basic_macros_installed):
+    """The one-call entry point: converts once, builds a table from the
+    same object, and produces the same live-QUA-variable frame rotation as
+    the manual three-step composition in test_symbolic_lowering.py."""
+    from qm import generate_qua_script
+    from qm.qua import program
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    circuit = Circuit(1)
+    circuit.add(gates.RZ(0, theta=sp.Symbol("theta")))
+
+    with program() as prog:
+        backend.circuit_to_qua(circuit)
+    script = generate_qua_script(prog)
+
+    rotations = [line.strip() for line in script.splitlines() if "frame_rotation_2pi" in line]
+    assert len(rotations) == 1, script
+    assert "declare(fixed" in script
+
+
+def test_circuit_to_qua_accepts_explicit_param_table(add_basic_macros_installed):
+    """Two circuits sharing one pre-built table -- the motivating use case
+    for accepting param_table explicitly instead of always rebuilding it.
+
+    Each ``quantum_circuit_to_qua`` call makes its own local copy of the
+    table's variable (``assign(v2, v1)``, ``assign(v3, v1)`` below), so
+    "one shared table" shows up as both copies being assigned *from* the
+    same source variable, not as a single ``declare(fixed`` in the script.
+    """
+    import re
+
+    from qm import generate_qua_script
+    from qm.qua import program
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    theta = sp.Symbol("theta")
+    circuit_a = Circuit(1)
+    circuit_a.add(gates.RZ(0, theta=theta))
+    circuit_b = Circuit(1)
+    circuit_b.add(gates.RZ(0, theta=2 * theta))
+
+    table = QiboParameterTable.from_qibo_circuit(circuit_a)
+
+    with program() as prog:
+        table.declare()
+        backend.circuit_to_qua(circuit_a, param_table=table)
+        backend.circuit_to_qua(circuit_b, param_table=table)
+    script = generate_qua_script(prog)
+
+    sources = re.findall(r"assign\(v\d+, (v\d+)\)", script)
+    assert len(sources) == 2, script
+    assert sources[0] == sources[1], script
+
+
+def test_circuit_to_qua_rejects_parameter_name_colliding_with_machine_gate(add_basic_macros_installed):
+    """The precise version of the lower-bound check: a parameter named after
+    a macro installed on the machine (here, "x") but not used by *this*
+    circuit still collides, because Exporter's basis_gates comes from the
+    machine's whole Target. test_symbolic_lowering.py's
+    test_collision_check_is_scoped_to_gates_actually_used pins that such a
+    name is accepted when there is no machine to check against; this is the
+    complementary case where there is one."""
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    assert "x" in backend.qiskit_backend.qm_qasm_basis_gates
+
+    circuit = Circuit(1)
+    circuit.add(gates.RZ(0, theta=sp.Symbol("x")))
+
+    with pytest.raises(UnsupportedParameterError, match="collides"):
+        backend.circuit_to_qua(circuit)
+
+
+# --------------------------------------------------------------------------- #
+# Two-qubit connectivity direction
+#
+# Root-caused by a real "arbel" live-hardware failure: CZ(0,1) raised
+# qm_qasm's opaque UnresolvableOperation because the installed macro's flux
+# pulse only plays in one physical direction ("arbel"'s qA2-qA1 pair is only
+# registered as (control=qA2, target=qA1), never the reverse). On the
+# add_basic_macros_installed fixture, "q0-q1" has qubit_control="q0"
+# (index 0), qubit_target="q1" (index 1), so CZ(0,1) is the one direction
+# that is actually installed.
+# --------------------------------------------------------------------------- #
+
+
+def test_circuit_to_qua_compiles_valid_cz_direction(add_basic_macros_installed):
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    assert backend.qiskit_backend.qubit_pair_dict["q0-q1"] == (0, 1)
+
+    circuit = Circuit(2)
+    circuit.add(gates.CZ(0, 1))
+
+    backend.circuit_to_qua(circuit)  # must not raise
+
+
+def test_circuit_to_qua_rejects_reversed_cz_direction(add_basic_macros_installed):
+    """The precise failure mode found live on "arbel": CZ written in the
+    physically-uncalibrated direction must raise a clear, actionable error
+    naming the correct direction, not qm_qasm's opaque UnresolvableOperation
+    surfacing from deep inside the compiler."""
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+
+    circuit = Circuit(2)
+    circuit.add(gates.CZ(1, 0))
+
+    with pytest.raises(UnsupportedConnectivityError, match=r"cz\(q1, q0\).*cz\(q0, q1\)"):
+        backend.circuit_to_qua(circuit)
+
+
+def test_execute_circuit_rejects_reversed_cz_direction(add_basic_macros_installed):
+    """The same check must fire before execute_circuit ever attempts to
+    submit a job (no live QM connection is set up in this fixture)."""
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+
+    circuit = Circuit(2)
+    circuit.add(gates.CZ(1, 0))
+    circuit.add(gates.M(0, 1))
+
+    with pytest.raises(UnsupportedConnectivityError):
+        backend.execute_circuit(circuit)
+
+
+def test_circuit_to_qua_wire_names_routes_logical_qubits_to_the_calibrated_direction(add_basic_macros_installed):
+    """circuit.wire_names lets a caller route logical qubits onto whichever
+    physical qubits/direction is actually calibrated -- the fix for the
+    "arbel" failure, which had no such lever available at all."""
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+
+    # logical 0 -> "q1", logical 1 -> "q0": CZ(0,1) (logical) now addresses
+    # physical (1, 0) -- the direction that is NOT installed.
+    wrong_direction = Circuit(2, wire_names=["q1", "q0"])
+    wrong_direction.add(gates.CZ(0, 1))
+    with pytest.raises(UnsupportedConnectivityError):
+        backend.circuit_to_qua(wrong_direction)
+
+    # Swapping the gate's own argument order compensates, landing back on
+    # the calibrated physical (0, 1) direction.
+    right_direction = Circuit(2, wire_names=["q1", "q0"])
+    right_direction.add(gates.CZ(1, 0))
+    backend.circuit_to_qua(right_direction)  # must not raise
 
 
 def test_update_target_delegates_to_wrapped_backend(backend, dummy_machine):
