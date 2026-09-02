@@ -1,4 +1,4 @@
-"""Tests for qibo_qm_provider.qibolab_bridge._quam_wiring and the
+"""Tests for qibo_qm_provider.qibolab_bridge.quam_wiring and the
 instrument-wiring half of platform_from_quam.quam_to_qibolab_platform.
 
 Uses the ``mw_fem_machine`` fixture (real OPX1000 MW-FEM/LF-FEM port
@@ -15,9 +15,9 @@ from qibolab._core.instruments.qm import QmController
 from qibolab._core.instruments.qm.components import MwFemOscillatorConfig, OpxOutputConfig, QmAcquisitionConfig
 
 from qibo_qm_provider.exceptions import MissingQuamAttributeError, UnsupportedWiringError
-from qibo_qm_provider.qibolab_bridge._quam_platform_conversion import _build_couplers, _build_qubits
-from qibo_qm_provider.qibolab_bridge._quam_wiring import build_qm_wiring
 from qibo_qm_provider.qibolab_bridge.platform_from_quam import DEFAULT_QM_PORT, _build_qm_controller, quam_to_qibolab_platform
+from qibo_qm_provider.qibolab_bridge.quam_platform_conversion import _build_couplers, _build_qubits
+from qibo_qm_provider.qibolab_bridge.quam_wiring import build_qm_wiring
 
 # ---------------------------------------------------------------------------
 # build_qm_wiring -- channel/config shape
@@ -119,7 +119,7 @@ def test_flux_offset_comes_from_joint_offset_not_port(mw_fem_machine):
 def test_feedforward_and_exponential_together_warns_only_on_affected_qubit(mw_fem_machine):
     """mw0's flux port has both exponential_filter and feedforward_filter
     (the combination that risks double-applying the exponential correction,
-    see _quam_wiring's module docstring); mw1's has neither -- the warning
+    see quam_wiring's module docstring); mw1's has neither -- the warning
     must fire once, naming mw0, and not at all for mw1."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

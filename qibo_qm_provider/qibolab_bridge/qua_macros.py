@@ -34,7 +34,7 @@ from qibolab._core.pulses.pulse import Readout as QibolabReadout
 from qibolab._core.pulses.pulse import VirtualZ
 
 from . import naming
-from ._quam_pulses import max_voltage_for_channel, quam_envelope_to_qibolab_pulse, quam_pulse_from_qibolab_pulse
+from .quam_pulses import max_voltage_for_channel, quam_envelope_to_qibolab_pulse, quam_pulse_from_qibolab_pulse
 
 if TYPE_CHECKING:
     from qibolab._core.sequence import PulseSequence
@@ -213,10 +213,14 @@ def sequence_to_qua_macro(
                 amplitude_scale = override(instruction.id, "amplitude", amplitude_scale)
                 duration = override(instruction.id, "duration", None)
                 phase = override(instruction.id, "phase", instruction.relative_phase or None)
-                if phase:
+                # `is not None`, not truthiness: `phase` may be a live QUA variable when
+                # overridden via `parameters`, and `bool()` on one raises QmQuaException.
+                # Mirrors qibolab's own instructions._play, which checks
+                # `parameters.phase is not None` for the same reason.
+                if phase is not None:
                     channel.frame_rotation_2pi(phase / (2 * np.pi))
                 channel.play(op_name, amplitude_scale=amplitude_scale, duration=duration)
-                if phase:
+                if phase is not None:
                     qua.reset_frame(channel.name)  # mirrors qibolab's own instructions._play
 
             elif isinstance(instruction, QibolabReadout):

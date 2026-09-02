@@ -9,7 +9,7 @@ execution path.
 
 Scope for this slice: single-qubit ``RX``/``RX90``/``MZ`` and two-qubit ``CZ``
 natives -- envelope conversion itself (all 7 qibolab envelope kinds) is
-handled by :mod:`qibo_qm_provider.qibolab_bridge._quam_pulses`, shared with
+handled by :mod:`qibo_qm_provider.qibolab_bridge.quam_pulses`, shared with
 the QuAM -> qibolab direction and with ``qua_macros.py``.
 
 Qubit/pair identity mapping: Qibolab ``QubitId``/``QubitPairId`` values are
@@ -29,11 +29,11 @@ from qibolab._core.pulses.pulse import Readout as QibolabReadout
 from quam.core import QuamRoot
 from quam.core.macro import QuamMacro
 
-from ._quam_pulses import max_voltage_for_channel, quam_pulse_from_qibolab_pulse, quam_readout_pulse_from_qibolab_readout
 from .naming import (
     SINGLE_QUBIT_MACRO_NAMES,
     TWO_QUBIT_MACRO_NAMES,
 )
+from .quam_pulses import max_voltage_for_channel, quam_pulse_from_qibolab_pulse, quam_readout_pulse_from_qibolab_readout
 
 if TYPE_CHECKING:
     import qibolab

@@ -86,7 +86,7 @@ class MissingQuamAttributeError(AttributeError):
 class UnsupportedWiringError(NotImplementedError):
     """Raised when a QuAM channel's or port's wiring has no supported
     qibolab equivalent in
-    :mod:`qibo_qm_provider.qibolab_bridge._quam_wiring`.
+    :mod:`qibo_qm_provider.qibolab_bridge.quam_wiring`.
 
     Only OPX1000 MW-FEM (drive/readout) and LF-FEM (flux) wiring is
     supported. Octave/IQ-mixer channels (``IQChannel``/``InOutIQChannel``),

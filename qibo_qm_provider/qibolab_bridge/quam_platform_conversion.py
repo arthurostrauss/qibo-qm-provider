@@ -8,10 +8,10 @@ envelopes) is independently testable against the ``dummy_machine``/
 ``add_basic_macros_installed`` fixtures in ``test/conftest.py``.
 
 Scope of this module: topology (qubits/couplers) and native gates only --
-pulse-envelope conversion lives in ``_quam_pulses.py`` (shared with the
+pulse-envelope conversion lives in ``quam_pulses.py`` (shared with the
 qibolab -> QuAM direction), and ``Platform.instruments``/
 ``parameters.configs`` are built separately, by
-:mod:`qibo_qm_provider.qibolab_bridge._quam_wiring` (see its module
+:mod:`qibo_qm_provider.qibolab_bridge.quam_wiring` (see its module
 docstring), from the machine's OPX1000 MW-FEM/LF-FEM channel/port wiring.
 That module docstring also covers what happens when a machine's wiring
 isn't supported (Octave/IQ-mixer channels, non-FEM ports): an
@@ -42,8 +42,8 @@ from qibolab._core.pulses.pulse import Acquisition, Readout as QibolabReadout
 from qibolab._core.qubits import Qubit, QubitMap
 
 from ..exceptions import MissingQuamAttributeError
-from ._quam_pulses import max_voltage_for_channel, quam_envelope_to_qibolab_pulse
 from .naming import MACRO_NAME_TO_SINGLE_QUBIT_NATIVE, MACRO_NAME_TO_TWO_QUBIT_NATIVE, channel_id
+from .quam_pulses import max_voltage_for_channel, quam_envelope_to_qibolab_pulse
 
 if TYPE_CHECKING:
     from quam.core import QuamRoot
@@ -70,7 +70,7 @@ def _build_qubits(machine: "QuamRoot") -> QubitMap:
     expected to be chained in practice.
 
     Channel ids follow the shared :func:`naming.channel_id` grammar, which
-    is also what :func:`qibo_qm_provider.qibolab_bridge._quam_wiring.
+    is also what :func:`qibo_qm_provider.qibolab_bridge.quam_wiring.
     build_qm_wiring` registers into ``Platform.instruments`` -- so once
     instruments are built, ``Platform.channels`` lines up with these ids
     exactly.

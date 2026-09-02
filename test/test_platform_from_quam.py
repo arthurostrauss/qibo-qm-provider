@@ -1,5 +1,5 @@
 """Tests for qibo_qm_provider.qibolab_bridge.platform_from_quam and
-_quam_platform_conversion.
+quam_platform_conversion.
 
 Uses the real ``dummy_machine``/``add_basic_macros_installed`` fixtures from
 ``conftest.py`` (a fully in-memory ``FluxTunableQuam``, no network/hardware
@@ -17,13 +17,13 @@ from qibolab._core.pulses.envelope import Gaussian, Rectangular
 from quam.components.pulses import DragCosinePulse, GaussianPulse, SquarePulse
 
 from qibo_qm_provider.exceptions import AmplitudeOutOfRangeError, UnsupportedEnvelopeError
-from qibo_qm_provider.qibolab_bridge._quam_platform_conversion import (
+from qibo_qm_provider.qibolab_bridge.platform_from_quam import create_iqcc, create_local, quam_to_qibolab_platform
+from qibo_qm_provider.qibolab_bridge.quam_platform_conversion import (
     _build_couplers,
     _build_native_gates,
     _build_qubits,
     _quam_envelope_to_qibolab_pulse,
 )
-from qibo_qm_provider.qibolab_bridge.platform_from_quam import create_iqcc, create_local, quam_to_qibolab_platform
 
 # ---------------------------------------------------------------------------
 # _quam_envelope_to_qibolab_pulse
@@ -158,7 +158,7 @@ def test_cz_native_uses_moving_qubit_flux_channel(add_basic_macros_installed):
 
 def test_quam_to_qibolab_platform_builds_full_topology(add_basic_macros_installed):
     """dummy_machine has no `network` and uses Octave-less IQ channels
-    (XYDriveIQ/ReadoutResonatorIQ), neither of which _quam_wiring can build
+    (XYDriveIQ/ReadoutResonatorIQ), neither of which quam_wiring can build
     instruments from -- quam_to_qibolab_platform warns and falls back to an
     instruments-less Platform rather than raising (see
     test_quam_wiring.py for the machines/assertions that exercise the

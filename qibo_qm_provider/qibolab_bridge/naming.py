@@ -2,7 +2,7 @@
 
 Two independent conventions used to be duplicated across
 ``native_import.py`` (formerly ``pulse_sequence_import.py``),
-``_quam_platform_conversion.py``, and ``_quam_wiring.py``: the macro-name
+``quam_platform_conversion.py``, and ``quam_wiring.py``: the macro-name
 <-> native-gate-field mapping (``"x"``
 <-> ``"RX"``, etc.) and the channel-id grammar (``{qubit}/drive``,
 ``coupler_{pair}/flux``). Both directions of each are derived from one
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 __all__ = ["channel_id", "resolve_channel", "iter_channels"]
 
 # Single-/two-qubit macro name <-> qibolab native-gate field. Both
-# directions (`import_qibolab_natives_as_macros`, `_quam_platform_conversion`)
+# directions (`import_qibolab_natives_as_macros`, `quam_platform_conversion`)
 # derive from these two dicts instead of maintaining independent copies.
 SINGLE_QUBIT_MACRO_NAMES = {"RX": "x", "RX90": "sx", "MZ": "measure"}
 TWO_QUBIT_MACRO_NAMES = {"CZ": "cz"}
@@ -33,7 +33,7 @@ MACRO_NAME_TO_TWO_QUBIT_NATIVE = {v: k for k, v in TWO_QUBIT_MACRO_NAMES.items()
 
 # Channel-role suffix <-> QuAM attribute name, for a qubit and for a pair's
 # coupler respectively. Shared by the channel-id builder/resolver below and
-# by _quam_wiring.build_qm_wiring (which is what actually registers these
+# by quam_wiring.build_qm_wiring (which is what actually registers these
 # channel ids into a qibolab Platform).
 _CHANNEL_SUFFIX_TO_ATTR = {"drive": "xy", "probe": "resonator", "acquisition": "resonator", "flux": "z"}
 _PAIR_CHANNEL_SUFFIX_TO_ATTR = {"flux": "coupler"}
@@ -81,7 +81,7 @@ def iter_channels(machine: "QuamRoot") -> Iterator[Tuple[str, object]]:
     """Yield ``(channel_id, quam_channel)`` for every wired channel on
     ``machine``'s active qubits and pairs -- the qibolab-addressable
     channel set, keyed the same way :func:`channel_id` builds ids and
-    :mod:`qibo_qm_provider.qibolab_bridge._quam_wiring` registers them into
+    :mod:`qibo_qm_provider.qibolab_bridge.quam_wiring` registers them into
     ``Platform.instruments``.
 
     Skips any role whose QuAM attribute is ``None`` (e.g. a pair with no

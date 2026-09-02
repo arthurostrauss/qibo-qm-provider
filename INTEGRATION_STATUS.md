@@ -9,6 +9,8 @@ called out explicitly rather than by silently editing history.
 
 | Date | Slice | Section |
 |---|---|---|
+| 2026-09-03 | `IQCCQmController`: `QmController` subclass executing through IQCC's cloud manager, dispatched automatically from the machine's own `network` config | [`IQCCQmController`: cloud execution for `QiboQMPlatformBackend`](#iqccqmcontroller-cloud-execution-for-qiboqmplatformbackend-2026-09-03) |
+| 2026-09-03 | Architecture audit against `architecture_preliminary_insights.md`; README rewritten with the two-path reuse boundary and code examples | [Architecture audit and README rewrite](#architecture-audit-and-readme-rewrite-2026-09-03) |
 | 2026-08-27 | Real "arbel" `CZ` failure root-caused to directional connectivity and no `wire_names` support; both fixed | [Two-qubit connectivity direction: `wire_names` support and a real "arbel" bug, found and fixed](#two-qubit-connectivity-direction-wire_names-support-and-a-real-arbel-bug-found-and-fixed-2026-08-27) |
 | 2026-08-27 | `QiboQMBackend.circuit_to_qua`; symbolic `execute_circuit` now refuses explicitly; machine-level parameter/gate-name collision check; `fixed`-overflow bound corrected | [Slice 2: `circuit_to_qua` and its loose ends](#slice-2-circuit_to_qua-and-its-loose-ends-2026-08-27) |
 | 2026-08-26 | Gate renaming eliminated at the source; `qiskit-qm-provider` `OperationIdentifier` bug root-caused and fixed upstream | [Gate renaming and an upstream `qiskit-qm-provider` fix](#gate-renaming-and-an-upstream-qiskit-qm-provider-fix-2026-08-26) |
@@ -29,6 +31,155 @@ Companion documents: `symbolic_circuit_lowering.md` (the 2026-08-26 path, in
 depth, plus the findings and compromises behind it), `slice2_plan.md` (what is
 next for it), `qibo_backend_vs_qibolab_platform.md`,
 `qibolab_platform_from_quam_plan.md`, `qibocal_multi_qubit_handling.md`.
+
+## `IQCCQmController`: cloud execution for `QiboQMPlatformBackend` (2026-09-03)
+
+Closes item 1 from the "Status note" this session just added to `README.md`
+(and the same gap this document already named under "Revised target
+architecture", 2026-08-18: "stock `QmController.connect()`/`.play()` still
+cannot talk to IQCC"). Traced directly against the installed source before
+writing anything, not from memory of the earlier description:
+
+- `Platform.connect()` (`qibolab._core.platform.platform.py:152`) just calls
+  `.connect()` on every `platform.instruments` entry -- for this package,
+  that is the single `QmController` `qibolab_bridge._build_qm_controller`
+  builds. `QibolabBackend.execute_circuit`/`.execute_circuits` call
+  `self.platform.connect()` themselves, lazily, every time -- **not** at
+  `Platform`/backend construction. So the only thing that needed to change is
+  which controller *class* `_build_qm_controller` builds; nothing about when
+  `connect()` runs.
+- `QmController.connect()` (unmodified) always builds a plain
+  `qm.QuantumMachinesManager` from `self.address.split(":")` -- no hook for a
+  different manager class exists on the base class at all.
+- `QmController.play()` then assumes that manager's full local surface:
+  `manager.open_qm(config) -> QuantumMachine`, `.compile(program) ->
+  program_id`, cached in a **strictly-typed pydantic model**
+  (`Cache(machine: QuantumMachine | QmApiWithDeprecations, ...)`,
+  `arbitrary_types_allowed=True` still validates by `isinstance`), then
+  `.queue.add_compiled(program_id) -> QmPendingJob`, `.wait_for_execution()`.
+  `iqcc_cloud_client.qmm_cloud.CloudQuantumMachinesManager`/
+  `CloudQuantumMachine` (confirmed by reading `qmm_cloud.py` directly) expose
+  none of that: only a single, synchronous
+  `CloudQuantumMachine.execute(program, options) -> CloudJob`.
+- **Verified the gap is narrower than "the whole driver doesn't work":**
+  `CloudQuantumMachinesManager.open_qm(config)` already matches
+  `QmController.play()`'s call exactly, and every
+  `qibolab._core.instruments.qm.program.acquisition.Acquisition.fetch`
+  implementation only ever calls `handles.get(name).fetch_all()` -- which
+  `CloudResultHandles`/`CloudResult` already implement, `wait_for_all_values`
+  included (a documented no-op on the cloud side). Only the
+  compile-then-queue-then-wait sandwich in the middle needed replacing.
+
+**Built** (`qibolab_bridge/iqcc_controller.py`, `IQCCQmController(QmController)`):
+
+- `connect()` delegates to `self.machine.connect()` instead of rebuilding a
+  manager from `self.address` -- `self.machine` is the source QuAM object
+  (a new required field on this subclass only). `quam_builder`'s own
+  `Quam.connect()` already resolves `network.qmm_class`/`qmm_settings` from
+  the loaded state; confirmed directly against the real `"arbel"`
+  `wiring.json` that its `network` already carries
+  `qmm_class="iqcc_cloud_client.CloudQuantumMachinesManager"` and
+  `qmm_settings={"backend": "arbel"}`, so this one delegation reuses the
+  exact resolution `qiskit_qm_provider.QMBackend.qmm` already relies on for
+  the OpenQASM path, with no IQCC-specific logic duplicated here. Raises
+  `TypeError` if `machine.connect()` doesn't actually return a
+  `CloudQuantumMachinesManager`, so a misconfigured/local machine fails
+  loudly here rather than inside `play()`.
+- `play()` is a near-complete copy of `QmController.play()` (registration
+  calls -- `configure_channel(s)`, `register_pulses`, `register_acquisitions`,
+  `preprocess_sweeps` -- are the real, inherited methods, unchanged) with the
+  compile/`Cache`/queue/wait tail replaced by one
+  `manager.open_qm(config).execute(program, options=...)` call, whose
+  `.result_handles` feeds directly into the same `fetch_results` used by the
+  local path. Not implemented as `super().play()` with a patched manager,
+  because `Cache`'s pydantic typing makes that impossible (see above) --
+  confirmed by trying it.
+- `disconnect()` raises `NotImplementedError` if `keep_dc_offsets_on=False`
+  (the base implementation would call
+  `self.manager.close_all_quantum_machines()`, which the cloud manager
+  doesn't have) rather than a confusing `AttributeError`; default behavior
+  (`keep_dc_offsets_on=True`, never calling that method) is unaffected.
+
+**Dispatch** (`platform_from_quam._resolve_controller_class`, called from
+`_build_qm_controller`): reuses `quam_builder`'s own private
+`Quam._get_qmm_class()` (rather than re-deriving its
+`use_custom_qmm`/`qmm_class` branching independently, which could drift from
+what `connect()` itself does) to decide `IQCCQmController` vs. plain
+`QmController`, purely from the machine's own `network` config -- the same
+distinction `machine.connect()` makes, so a locally-wired machine and an
+IQCC-fetched one need no separate call path. Fails soft to `QmController` on
+any resolution problem (bad `qmm_class` string, `iqcc_cloud_client` not
+installed) rather than raising, so `quam_to_qibolab_platform`'s existing
+"never regress to raising where it previously succeeded" contract holds --
+the real failure still surfaces at `connect()` time, exactly as before this
+existed.
+
+**Verified, offline, in this session** (`test/test_iqcc_qm_controller.py`,
+7 new tests; full suite 239 passed, 5 deselected, 1 xpassed -- no
+regressions): dispatch falls back to `QmController` both when
+`iqcc_cloud_client` genuinely isn't installed (this project's own `.venv` --
+a real condition, not simulated) and when `network` has no `qmm_class` at
+all; dispatch picks `IQCCQmController` when a minimal faked
+`iqcc_cloud_client.qmm_cloud` module is registered; `connect()` both
+succeeds (wiring through to the fake manager) and raises `TypeError` for a
+non-cloud `machine.connect()` return value; `disconnect()` raises for
+`keep_dc_offsets_on=False`; and, most substantially, `play()` was exercised
+end to end against the real `mw_fem_machine` fixture -- real channel/pulse/
+acquisition registration through `build_qm_wiring`'s actual output, a real
+QUA program built via `program(...)`, executed against a fake
+manager/machine/job/handles chain standing in only for the network boundary,
+with results correctly fetched back through `fetch_results`.
+
+**Not yet done:** live-hardware verification against real IQCC execution
+(no IQCC credentials available in this session -- same limitation as every
+other not-yet-hardware-validated item in this document) and wiring
+`IQCCQmController` into `QiboQMPlatformBackend.execute_circuit`'s actual call
+path end to end on real hardware (the plumbing is a straight
+`platform.connect()` -> `platform.execute(...)` call already; what's
+missing is a live `"arbel"` run to confirm it, not new code).
+
+## Architecture audit and README rewrite (2026-09-03)
+
+Read `architecture_preliminary_insights.md` and this entire file end to end,
+then read the actual current source (`qibo_qm_backend.py`,
+`qibo_qm_platform_backend.py`, `circuit_conversion.py`, `gate_map.py`,
+`parameter_table.py`, `platform_from_quam.py`, `qua_macros.py`,
+`platform_naming.py`, `pyproject.toml`) directly, rather than trusting this
+document's own summaries, to check whether the status recorded below still
+matches what is actually built. It does — no contradiction found between what
+this file claims and what the source does. The gap this section closes is
+that the *reuse boundary* (which behavior comes from `qiskit-qm-provider`,
+which from `qibolab`, which is new here) was previously only reconstructable
+by reading this whole file; `README.md` did not state it.
+
+**Done:** `README.md` gained a "How the provider is built" section — an
+explicit module-by-module reuse table for each backend, a side-by-side reuse
+comparison, and a working `QiboQMPlatformBackend.from_iqcc`/`qibo.set_backend`
+example (the README previously only carried a `QiboQMBackend` example) — plus
+a dated "Status note" section acknowledging, in the note's own terms, which
+of its four layers collapsed into direct reuse and which of its §7
+implementation-order steps remain undone. Nothing in the package's actual
+behavior changed; this is documentation only.
+
+**Confirmed still accurate, restated for the README's benefit:**
+- `QiboQMBackend`'s `register_gate`/`update_target`, macro installation,
+  `Target`/operation registry, calibration precedence, job submission, and
+  result fetching are literally the wrapped `qiskit_qm_provider.QMBackend`'s
+  own methods (`qibo_qm_backend.py:79-180`) — confirmed by reading the class
+  body, not assumed from this file's prose.
+- `QiboQMPlatformBackend.execute_circuit`/`.execute_circuits` are not
+  overridden at all (confirmed: no such methods exist on the class) — they
+  are `QibolabBackend`'s own, inherited unchanged.
+- The IQCC-cloud `QmController.connect()`/`.play()` gap and the
+  scaffolding-tool gap (§"What's missing" under "Platform name resolution"
+  above) are both still open in the current source — no `QmController`
+  subclass and no `scaffold_iqcc_platform`/`scaffold_local_platform` function
+  exist anywhere in `qibolab_bridge`.
+- `QiboParameterTable.from_qibo_circuit` (`backend/parameter_table.py`) is
+  confirmed to delegate to `qiskit_qm_provider.parameter_table.ParameterTable
+  .from_qiskit` rather than implement an SDK-neutral spec — it is a source
+  adapter on top of an existing concrete class, matching this file's own
+  §7-step-6 assessment ("not done") rather than superseding it.
 
 ## Two-qubit connectivity direction: `wire_names` support and a real "arbel" bug, found and fixed (2026-08-27)
 

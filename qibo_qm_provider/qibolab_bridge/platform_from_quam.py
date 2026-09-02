@@ -11,8 +11,8 @@ and as a direct, zero-folder Python entrypoint (explicit keyword arguments,
 no filesystem registration needed at all).
 
 ``quam_to_qibolab_platform`` builds qubits/couplers/native_gates (see
-``_quam_platform_conversion``) and, when the machine's wiring is supported
-(OPX1000 MW-FEM + LF-FEM only -- see ``_quam_wiring``'s module docstring),
+``quam_platform_conversion``) and, when the machine's wiring is supported
+(OPX1000 MW-FEM + LF-FEM only -- see ``quam_wiring``'s module docstring),
 ``instruments``/``parameters.configs`` too, so ``Platform.channels`` is
 populated and Qibocal protocols can address it. Unsupported wiring (Octave/
 IQ-mixer channels, non-FEM ports, non-1-GSa/s ports) falls back to an
@@ -30,14 +30,16 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from qibolab import Platform
+from qibolab._core.instruments.qm import QmController
 from qibolab._core.instruments.qm.components import QmConfigs
 from qibolab._core.parameters import ConfigKinds, NativeGates, Parameters, Settings
 from quam.core import QuamRoot
 
 from ..exceptions import MissingQuamAttributeError, UnsupportedWiringError
-from ._quam_platform_conversion import _build_couplers, _build_native_gates, _build_qubits
-from ._quam_wiring import build_qm_wiring
+from .iqcc_controller import IQCCQmController
 from .platform_naming import IqccSource, parse_platform_name
+from .quam_platform_conversion import _build_couplers, _build_native_gates, _build_qubits
+from .quam_wiring import build_qm_wiring
 
 __all__ = ["create_iqcc", "create_local", "quam_to_qibolab_platform", "DEFAULT_QUAM_CLASS"]
 
@@ -95,14 +97,45 @@ def _resolve_state_path(state_path: str, folder: Optional[Path]) -> str:
     return str(Path(folder) / p)
 
 
+def _resolve_controller_class(machine: QuamRoot) -> type:
+    """Whether ``machine.connect()`` resolves to IQCC's cloud manager.
+
+    Reuses ``quam_builder``'s own private resolution helper
+    (``Quam._get_qmm_class``) rather than re-deriving its
+    ``use_custom_qmm``/``qmm_class`` branching here, so this can never drift
+    from what ``connect()`` itself would do. Deliberately fails soft (falls
+    back to the plain ``QmController``, today's unconditional behavior) on
+    any resolution problem -- a bad ``qmm_class``/missing
+    ``iqcc_cloud_client`` should surface at ``connect()`` time, exactly as it
+    did before this function existed, not block ``Platform`` construction.
+    """
+    try:
+        get_qmm_class = getattr(machine, "_get_qmm_class", None)
+        qmm_class = get_qmm_class() if get_qmm_class is not None else None
+    except Exception:  # noqa: BLE001 - see docstring: fail soft, let connect() raise later.
+        return QmController
+    if qmm_class is None:
+        return QmController
+    try:
+        from iqcc_cloud_client.qmm_cloud import CloudQuantumMachinesManager
+    except ImportError:
+        return QmController
+    return IQCCQmController if issubclass(qmm_class, CloudQuantumMachinesManager) else QmController
+
+
 def _build_qm_controller(machine: QuamRoot, *, port: Optional[int] = None):
-    """Build a qibolab ``QmController`` + matching ``configs`` from a QuAM
-    object's wiring.
+    """Build a qibolab ``QmController`` (or ``IQCCQmController``) + matching
+    ``configs`` from a QuAM object's wiring.
 
     The actual channel/config conversion lives in
-    ``_quam_wiring.build_qm_wiring``; this function only assembles the
-    ``QmController`` itself (``address``, ``cluster_name``, ``fems``) from
-    ``machine.network``.
+    ``quam_wiring.build_qm_wiring``; this function only assembles the
+    controller itself (``address``, ``cluster_name``, ``fems``, and --
+    exclusively for ``IQCCQmController`` -- ``machine``) from
+    ``machine.network``. Which controller class gets built is decided by
+    :func:`_resolve_controller_class`, from that same ``network`` config --
+    the identical, config-driven distinction ``machine.connect()`` itself
+    makes, so a locally-wired machine and an IQCC-fetched one need no
+    separate call path here.
 
     Args:
         machine: The QuAM root to wire.
@@ -113,10 +146,8 @@ def _build_qm_controller(machine: QuamRoot, *, port: Optional[int] = None):
 
     Raises:
         MissingQuamAttributeError: If ``machine.network`` has no ``"host"``.
-        UnsupportedWiringError: See ``_quam_wiring.build_qm_wiring``.
+        UnsupportedWiringError: See ``quam_wiring.build_qm_wiring``.
     """
-    from qibolab._core.instruments.qm import QmController
-
     network = getattr(machine, "network", None) or {}
     host = network.get("host")
     if not host:
@@ -136,11 +167,14 @@ def _build_qm_controller(machine: QuamRoot, *, port: Optional[int] = None):
         )
 
     channels, configs, fems = build_qm_wiring(machine)
-    controller = QmController(
+    controller_cls = _resolve_controller_class(machine)
+    extra = {"machine": machine} if controller_cls is IQCCQmController else {}
+    controller = controller_cls(
         address=f"{host}:{resolved_port}",
         cluster_name=network.get("cluster_name"),
         channels=channels,
         fems=fems,
+        **extra,
     )
     return controller, configs
 
@@ -150,13 +184,13 @@ def quam_to_qibolab_platform(machine: QuamRoot, name: str, *, port: Optional[int
 
     Populates ``qubits``/``couplers`` (topology) and ``parameters.
     native_gates`` (from QuAM's ``.macros``) in one pass -- see
-    ``_quam_platform_conversion`` for the per-piece logic.
+    ``quam_platform_conversion`` for the per-piece logic.
     ``parameters.settings.relaxation_time`` is set from
     ``machine.thermalization_time`` when available (best-effort; falls back
     to qibolab's own default otherwise).
 
     ``instruments``/``parameters.configs`` are populated from the machine's
-    OPX1000 MW-FEM/LF-FEM wiring (see ``_quam_wiring``) when supported. If
+    OPX1000 MW-FEM/LF-FEM wiring (see ``quam_wiring``) when supported. If
     the machine's wiring is not supported (Octave/IQ-mixer channels,
     non-FEM ports, non-1-GSa/s ports) or ``machine.network`` has no
     ``"host"`` (e.g. a machine never connected to a real cluster, like this

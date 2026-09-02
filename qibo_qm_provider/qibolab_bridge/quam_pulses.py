@@ -1,7 +1,7 @@
 """Private, bidirectional QuAM <-> qibolab pulse-envelope conversion.
 
 Not re-exported from :mod:`qibo_qm_provider.qibolab_bridge` -- imported by
-``_quam_platform_conversion.py`` (QuAM -> qibolab, for native-gate/topology
+``quam_platform_conversion.py`` (QuAM -> qibolab, for native-gate/topology
 inspection), ``native_import.py`` (qibolab -> QuAM, for the legacy
 OpenQASM/QuAM-macro backend), and ``qua_macros.py`` (qibolab -> QuAM, for
 the QUA-macro emitter). Split out so both directions of envelope conversion

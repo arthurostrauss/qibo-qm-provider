@@ -2,7 +2,7 @@
 
 Not re-exported from :mod:`qibo_qm_provider.qibolab_bridge` -- imported only
 by :mod:`qibo_qm_provider.qibolab_bridge.platform_from_quam`, mirroring
-:mod:`qibo_qm_provider.qibolab_bridge._quam_platform_conversion`'s convention
+:mod:`qibo_qm_provider.qibolab_bridge.quam_platform_conversion`'s convention
 of splitting each conversion concern into its own independently-testable,
 private module.
 
@@ -142,7 +142,7 @@ def _check_sampling_rate(port, owner_label: str) -> None:
 def _readout_pulse(qubit):
     """The QuAM readout ``Pulse`` used for shot threshold/rotation info,
     resolved via the ``measure`` macro (mirrors
-    ``_quam_platform_conversion._single_qubit_natives``).
+    ``quam_platform_conversion._single_qubit_natives``).
 
     Returns ``None`` if no ``measure`` macro is installed, so acquisition
     channel *wiring* still succeeds without native-gate readout calibration
@@ -310,7 +310,7 @@ def build_qm_wiring(machine: "QuamRoot") -> tuple[dict[str, Channel], dict[str, 
     channel/port graph.
 
     Channel ids match :func:`qibo_qm_provider.qibolab_bridge.
-    _quam_platform_conversion._build_qubits`/``_build_couplers`` exactly
+    quam_platform_conversion._build_qubits`/``_build_couplers`` exactly
     (``{qubit}/drive``, ``{qubit}/probe``, ``{qubit}/acquisition``,
     ``{qubit}/flux``, ``coupler_{pair}/flux``), so ``Platform.channels``
     (derived from these instruments) lines up with ``Platform.qubits``/

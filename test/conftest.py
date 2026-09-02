@@ -242,7 +242,7 @@ def _make_mw_fem_qubit(
     flux_kwargs = {}
     if flux_filters:
         # Both a raw FIR (feedforward_filter) and exponential terms present
-        # at once -- exercises the filter-loss warning in _quam_wiring, the
+        # at once -- exercises the filter-loss warning in quam_wiring, the
         # same shape found on every real arbel flux port.
         flux_kwargs = dict(
             exponential_filter=[(-0.0089, 100.0), (0.0071, 3512.0)],
@@ -261,7 +261,7 @@ def _make_mw_fem_qubit(
     qubit = FluxTunableTransmon(id=name, xy=xy, resonator=resonator, z=z)
 
     # A "measure" macro pointing at the "readout" pulse, matching what
-    # add_basic_macros installs on real hardware -- _quam_wiring resolves
+    # add_basic_macros installs on real hardware -- quam_wiring resolves
     # the acquisition channel's threshold/iq_angle through this macro (not a
     # hardcoded pulse name), so wiring tests that check those fields need it
     # present. Imported lazily, matching this codebase's existing convention
@@ -276,7 +276,7 @@ def _make_mw_fem_qubit(
 def mw_fem_machine() -> FluxTunableQuam:
     """A ``FluxTunableQuam`` wired through real OPX1000 MW-FEM (drive/probe/
     acquisition) and LF-FEM (flux) port objects -- the only fixture in this
-    suite that can exercise ``_quam_wiring.build_qm_wiring``'s MW-FEM path;
+    suite that can exercise ``quam_wiring.build_qm_wiring``'s MW-FEM path;
     ``dummy_machine`` is Octave-less IQ (``XYDriveIQ``/``ReadoutResonatorIQ``)
     with bare ``("con1", n)`` tuple ports and cannot.
 

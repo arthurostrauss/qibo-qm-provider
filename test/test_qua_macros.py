@@ -119,6 +119,20 @@ def test_sequence_to_qua_macro_amplitude_parameter_override(mw_fem_machine):
         macro(amp_var)  # a live QUA variable overrides the shape-matched amplitude_scale
 
 
+def test_sequence_to_qua_macro_phase_parameter_override(mw_fem_machine):
+    """Regression test: overriding a pulse's phase with a live QUA variable
+    used to crash with QmQuaException, because the phase was tested for
+    truthiness (``if phase:``) instead of ``is not None`` -- ``bool()`` on a
+    QUA variable is not allowed. See symbolic_circuit_lowering.md."""
+    pulse = Pulse(duration=40, amplitude=0.2, envelope=Rectangular())
+    sequence = PulseSequence([(channel_id("mw0", "drive"), pulse)])
+
+    with qua.program():
+        phase_var = qua.declare(qua.fixed)
+        macro = sequence_to_qua_macro(mw_fem_machine, sequence, parameters={"phase": (pulse.id, "phase")})
+        macro(phase_var)  # a live QUA variable overrides the pulse's (absent) relative_phase
+
+
 def test_sequence_to_qua_macro_invalid_parameter_field_raises(mw_fem_machine):
     pulse = Pulse(duration=40, amplitude=0.2, envelope=Rectangular())
     sequence = PulseSequence([(channel_id("mw0", "drive"), pulse)])

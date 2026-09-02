@@ -1,9 +1,9 @@
-"""Tests for qibo_qm_provider.qibolab_bridge._quam_pulses -- the shared,
+"""Tests for qibo_qm_provider.qibolab_bridge.quam_pulses -- the shared,
 bidirectional QuAM <-> qibolab pulse-envelope conversion.
 
 QuAM -> qibolab tests for Rectangular/Gaussian/generic-fallback already live
 in test_platform_from_quam.py (via the _quam_envelope_to_qibolab_pulse
-backward-compat alias re-exported from _quam_platform_conversion). This
+backward-compat alias re-exported from quam_platform_conversion). This
 module focuses on the qibolab -> QuAM direction (new coverage: all 7
 qibolab envelope kinds, previously 1 of 7 -- rectangular only, since gaussian
 had no forward-direction converter at all before this module existed) and
@@ -17,7 +17,7 @@ from qibolab._core.pulses.pulse import Acquisition, Pulse, Readout
 from quam.components.pulses import GaussianPulse, SquarePulse, SquareReadoutPulse, WaveformPulse
 
 from qibo_qm_provider.exceptions import AmplitudeOutOfRangeError
-from qibo_qm_provider.qibolab_bridge._quam_pulses import (
+from qibo_qm_provider.qibolab_bridge.quam_pulses import (
     quam_envelope_to_qibolab_pulse,
     quam_pulse_from_qibolab_pulse,
     quam_readout_pulse_from_qibolab_readout,
@@ -66,7 +66,7 @@ def test_gaussian_converts_to_symbolic_gaussian_pulse():
 
 
 def test_drag_falls_back_to_waveform_pulse():
-    """Not quam's deprecated DragGaussianPulse -- see _quam_pulses'
+    """Not quam's deprecated DragGaussianPulse -- see quam_pulses'
     module-level comment on why the sampled fallback is used instead."""
     pulse = Pulse(duration=40, amplitude=0.3, envelope=Drag(rel_sigma=0.2, beta=0.5))
     quam_pulse = quam_pulse_from_qibolab_pulse(pulse, "test", max_voltage=0.5)

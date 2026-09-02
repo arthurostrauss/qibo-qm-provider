@@ -1,5 +1,5 @@
 """Opt-in, real-hardware verification for the QuAM -> qibolab instrument
-wiring (``qibo_qm_provider.qibolab_bridge._quam_wiring``/
+wiring (``qibo_qm_provider.qibolab_bridge.quam_wiring``/
 ``platform_from_quam._build_qm_controller``).
 
 Mirrors ``test_iqcc_integration.py``'s pattern (same backend name, same
@@ -135,7 +135,7 @@ def test_compiles_real_native_gate_sequence_offline(backend):
     (``controller.py:666-670``).
 
     Builds that one qubit's native via
-    ``_quam_platform_conversion._single_qubit_natives`` directly (rather than
+    ``quam_platform_conversion._single_qubit_natives`` directly (rather than
     ``platform.natives``, which would require ``add_basic_macros`` +
     ``backend.refresh()`` across the *whole* machine -- and, per the module
     docstring, 6 *other* qubits currently raise ``AmplitudeOutOfRangeError``
@@ -156,7 +156,7 @@ def test_compiles_real_native_gate_sequence_offline(backend):
     from qibolab._core.execution_parameters import ExecutionParameters
     from qibolab._core.sequence import PulseSequence
 
-    from qibo_qm_provider.qibolab_bridge._quam_platform_conversion import _single_qubit_natives
+    from qibo_qm_provider.qibolab_bridge.quam_platform_conversion import _single_qubit_natives
 
     qubit_id = _QUBIT_WITHIN_VOLTAGE_CEILING
     quam_qubit = backend.machine.qubits[qubit_id]

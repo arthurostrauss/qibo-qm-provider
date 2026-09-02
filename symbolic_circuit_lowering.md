@@ -429,15 +429,24 @@ Both corrected in its docstring, both pinned by tests:
    *before* constructing the backend remains the documented workaround either
    way. Not yet filed as an upstream `qm_qasm` issue.
 
-### Reported separately: `sequence_to_qua_macro`'s `phase` hook
+### Fixed: `sequence_to_qua_macro`'s `phase` hook
 
-Not part of this path, found while reading it. `qua_macros.py:216` guards the
-frame rotation with `if phase:`, and `bool()` on a QUA variable raises
-`QmQuaException: Attempted to use a Python logical operator on a QUA variable`.
-So `parameters={name: (pulse_id, "phase")}` — an advertised feature — crashes for
-`Pulse` instructions. The `VirtualZ` branch has no such guard and is fine. Fix
-is to track "is this overridden" as a Python-level boolean instead of testing
-the value's truthiness.
+Not part of this path, found while reading it — and now fixed. `qua_macros.py`
+guarded the frame rotation with `if phase:`, and `bool()` on a QUA variable
+raises `QmQuaException: Attempted to use a Python logical operator on a QUA
+variable`. So `parameters={name: (pulse_id, "phase")}` — an advertised
+feature — crashed for `Pulse` instructions whenever the override was a live
+QUA variable. The `VirtualZ` branch had no such guard and was already fine.
+
+Fixed by testing `phase is not None` instead of truthiness, matching
+qibolab's own emitter (`qibolab._core.instruments.qm.program.instructions.
+_play`/`_virtualz`, both guard with `parameters.phase is not None`) — identity
+comparison against `None` never invokes the QUA object's own operators, so it
+is safe regardless of whether `phase` ends up a concrete Python float or a
+live QUA variable. `amplitude_scale`/`duration` in the same function were
+checked and don't share the bug: they're either passed straight through with
+no boolean test, or already compared with `is None`. Regression test:
+`test_sequence_to_qua_macro_phase_parameter_override`.
 
 ---
 
