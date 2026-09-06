@@ -166,22 +166,32 @@ def _flux_offset(flux_line) -> float:
     return getattr(flux_line, attr, 0.0) or 0.0
 
 
-def _wire_drive(qubit, channels: dict, configs: dict, fems: dict) -> None:
-    xy = qubit.xy
+def _wire_mw_drive_channel(
+    ch_id: str, xy, channels: dict, configs: dict, fems: dict, owner_label: str
+) -> None:
+    """Wire one MW-FEM XY-drive-shaped channel (a qubit's ``xy``, or a TWPA's
+    ``pump``/``pump_``/``isolation``/``isolation_``) into ``channels``/
+    ``configs``/``fems``, keyed by ``ch_id``.
+
+    Shared by :func:`_wire_drive` (qubit drive) and :func:`_wire_twpa` (TWPA
+    pump/isolation) -- both wire the same shape of QuAM component
+    (``quam.components.channels.MWChannel``, e.g. ``quam_builder``'s
+    ``XYDriveMW``) onto an MW-FEM output port the same way; only the id and
+    error-message owner differ.
+    """
     if not isinstance(xy, MWChannel):
         raise UnsupportedWiringError(
-            f"Qubit {qubit.id!r}: drive channel {type(xy).__name__!r} is not an MW-FEM "
-            "channel (quam.components.channels.MWChannel) -- Octave/IQ-mixer drive "
-            "wiring is not supported by this converter."
+            f"{owner_label}: channel {type(xy).__name__!r} is not an MW-FEM channel "
+            "(quam.components.channels.MWChannel) -- Octave/IQ-mixer wiring is not "
+            "supported by this converter."
         )
     port = xy.opx_output
-    _check_sampling_rate(port, f"qubit {qubit.id!r} drive")
+    _check_sampling_rate(port, owner_label)
 
-    device, path = _device(port, f"qubit {qubit.id!r} drive"), _path(port)
+    device, path = _device(port, owner_label), _path(port)
     lo_id = _lo_id(port)
-    drive_id = channel_id(qubit.id, "drive")
 
-    channels[drive_id] = IqChannel(device=device, path=path, lo=lo_id, mixer=None)
+    channels[ch_id] = IqChannel(device=device, path=path, lo=lo_id, mixer=None)
     configs.setdefault(
         lo_id,
         MwFemOscillatorConfig(
@@ -192,8 +202,55 @@ def _wire_drive(qubit, channels: dict, configs: dict, fems: dict) -> None:
             sampling_rate=port.sampling_rate,
         ),
     )
-    configs[drive_id] = IqConfig(frequency=xy.upconverter_frequency + xy.intermediate_frequency)
+    configs[ch_id] = IqConfig(frequency=xy.upconverter_frequency + xy.intermediate_frequency)
     fems[device] = "MW"
+
+
+def _wire_drive(qubit, channels: dict, configs: dict, fems: dict) -> None:
+    _wire_mw_drive_channel(
+        channel_id(qubit.id, "drive"),
+        qubit.xy,
+        channels,
+        configs,
+        fems,
+        owner_label=f"qubit {qubit.id!r} drive",
+    )
+
+
+def _wire_twpa(twpa, channels: dict, configs: dict, fems: dict) -> None:
+    """Wire one TWPA's pump/isolation channels into ``Platform.channels``/
+    ``Platform.parameters.configs``, for Qibocal ``Sweeper.channels``
+    addressing and topology inspection.
+
+    ``pump_``/``isolation_`` (the non-sticky calibration variants) are wired
+    too, for full ``Platform.channels`` symmetry with the sticky ones.
+
+    Each present role becomes its own channel id, ``"{twpa.name}/{role}"``
+    (e.g. ``"twpaA/pump"``) -- not a qubit/pair-coupler id, since a TWPA
+    isn't owned by either (see ``naming.py``'s owner-kind grammar).
+
+    Unlike before this package's QM-execution path moved to
+    ``machine.generate_config()`` as sole config authority (see
+    ``quam_controller``'s module docstring), wiring here no longer needs to
+    flag these ids as "always-on": ``initialize_qpu()`` plays every TWPA's
+    pump directly via QuAM's own channel methods, and
+    ``machine.generate_config()`` already includes every TWPA element/
+    operation/sticky-mode unconditionally -- there is no separate,
+    from-scratch ``Configuration`` object left that could omit them.
+    """
+    for role in ("pump", "pump_", "isolation", "isolation_"):
+        ch = getattr(twpa, role, None)
+        if ch is None:
+            continue
+        ch_id = f"{twpa.name}/{role}"
+        _wire_mw_drive_channel(
+            ch_id,
+            ch,
+            channels,
+            configs,
+            fems,
+            owner_label=f"TWPA {twpa.name!r} {role}",
+        )
 
 
 def _wire_probe_and_acquisition(qubit, channels: dict, configs: dict, fems: dict) -> None:
@@ -304,10 +361,15 @@ def _wire_flux(ch_id: str, flux_line, channels: dict, configs: dict, fems: dict,
     fems[device] = "LF"
 
 
-def build_qm_wiring(machine: "QuamRoot") -> tuple[dict[str, Channel], dict[str, Config], dict[str, str]]:
-    """Build ``channels``, ``configs``, and ``fems`` for a
-    :class:`~qibolab._core.instruments.qm.QmController` from a QuAM object's
-    channel/port graph.
+def build_qm_wiring(
+    machine: "QuamRoot",
+) -> tuple[dict[str, Channel], dict[str, Config], dict[str, str]]:
+    """Build ``channels``, ``configs``, and ``fems`` for
+    ``Platform.channels``/``Platform.parameters.configs`` from a QuAM
+    object's channel/port graph -- Qibocal ``Sweeper.channels`` addressing
+    and topology inspection, independent of who authors the QM wire config
+    (see ``quam_controller``'s module docstring: that's
+    ``machine.generate_config()``, not this function's output).
 
     Channel ids match :func:`qibo_qm_provider.qibolab_bridge.
     quam_platform_conversion._build_qubits`/``_build_couplers`` exactly
@@ -315,14 +377,16 @@ def build_qm_wiring(machine: "QuamRoot") -> tuple[dict[str, Channel], dict[str, 
     ``{qubit}/flux``, ``coupler_{pair}/flux``), so ``Platform.channels``
     (derived from these instruments) lines up with ``Platform.qubits``/
     ``Platform.couplers`` (derived independently from QuAM's qubit/pair
-    graph).
+    graph). TWPA pump/isolation channels (see :func:`_wire_twpa`) are the one
+    exception -- keyed ``{twpa.name}/{role}``, not owned by any qubit/pair.
 
     Raises:
-        UnsupportedWiringError: If any qubit/pair uses wiring this converter
-            doesn't support (Octave/IQ-mixer channels, non-FEM ports, or a
-            sampling rate other than 1 GSa/s). Raised for the whole machine
-            rather than partially wiring it, so a caller never receives a
-            ``Platform`` that silently omits some qubits' channels.
+        UnsupportedWiringError: If any qubit/pair/TWPA uses wiring this
+            converter doesn't support (Octave/IQ-mixer channels, non-FEM
+            ports, or a sampling rate other than 1 GSa/s). Raised for the
+            whole machine rather than partially wiring it, so a caller never
+            receives a ``Platform`` that silently omits some qubits'
+            channels.
     """
     channels: dict[str, Channel] = {}
     configs: dict[str, Config] = {}
@@ -349,5 +413,8 @@ def build_qm_wiring(machine: "QuamRoot") -> tuple[dict[str, Channel], dict[str, 
                 fems,
                 owner_label=f"pair {pair_name!r} coupler",
             )
+
+    for twpa in getattr(machine, "twpas", {}).values():
+        _wire_twpa(twpa, channels, configs, fems)
 
     return channels, configs, fems
