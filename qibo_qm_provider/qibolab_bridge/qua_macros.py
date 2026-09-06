@@ -29,11 +29,13 @@ from inspect import Parameter as SigParameter, Signature
 from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple
 
 import numpy as np
+from qibolab._core.execution_parameters import AcquisitionType
 from qibolab._core.pulses.pulse import Align, Delay, Pulse as QibolabPulse, PulseId
 from qibolab._core.pulses.pulse import Readout as QibolabReadout
 from qibolab._core.pulses.pulse import VirtualZ
 
 from . import naming
+from .qua_acquisition import IntegratedAcquisition, ShotsAcquisition
 from .quam_pulses import max_voltage_for_channel, quam_envelope_to_qibolab_pulse, quam_pulse_from_qibolab_pulse
 
 if TYPE_CHECKING:
@@ -138,16 +140,31 @@ def sequence_to_qua_macro(
     sequence: "PulseSequence",
     *,
     parameters: Optional[Dict[str, ParameterTarget]] = None,
+    operation_overrides: Optional[Dict[PulseId, str]] = None,
     relaxation_time: Optional[float] = None,
     register_missing: bool = True,
+    average: bool = False,
+    acquisition_type: AcquisitionType = AcquisitionType.INTEGRATION,
 ) -> Callable:
     """Convert a qibolab ``PulseSequence`` into a reusable QUA macro.
 
     Must be called inside an existing ``with program():`` block (matching
     ``qibolab._core.instruments.qm.program.instructions.play``'s own
-    contract, which this function's instruction mapping is ported from) --
-    it emits QUA statements immediately when the returned callable is
-    invoked, it does not build a standalone program.
+    contract, which this function's instruction mapping is ported from).
+    Unlike before this function also emits QUA immediately, at *build*
+    time, not only when the returned callable is invoked: every ``Readout``
+    in ``sequence`` is grouped into an :class:`~.qua_acquisition.
+    IntegratedAcquisition` by ``(operation, element)`` (mirroring qibolab's
+    own multiplexed-readout grouping,
+    ``qibolab._core.instruments.qm.controller.QmController.
+    register_acquisitions``), and each group's ``.declare()`` (stream/
+    variable declaration) runs once, here, before the returned macro is
+    ever invoked -- matching qibolab's own ``program()``, which declares
+    every acquisition once before its shot loop, never per shot. Building
+    the macro without ever invoking it (e.g. ``register_missing=False``
+    raising before any ``Readout`` is reached) still requires a program
+    scope if ``sequence`` contains a ``Readout`` at all, since the grouping
+    pass runs unconditionally, before that raise.
 
     Args:
         machine: The QuAM root whose channels the sequence plays on.
@@ -173,21 +190,102 @@ def sequence_to_qua_macro(
             ``machine`` -- picked up by ``machine.generate_config()`` with
             no extra step, the same contract ``register_gate`` already has
             on the legacy backend). When ``False``, raises instead.
+        operation_overrides: ``{pulse_id: op_name}``. Forces that one pulse
+            instance (identified by its own ``PulseId``, same granularity
+            as ``parameters``) to play/measure the named QuAM operation
+            directly, bypassing :func:`_resolve_operation`'s shape-matching
+            entirely for it. Needed for amplitude/duration_interpolated
+            sweeps (see ``qua_sweep.py``): those pre-register a *dedicated*,
+            rescaled reference operation for the swept pulse instance
+            specifically (mirroring qibolab's own
+            ``register_amplitude_sweeper_pulses``/
+            ``register_duration_sweeper_pulses``) -- using the pulse's
+            normally shape-matched operation instead would apply the real-
+            time ``amplitude_scale``/``duration`` override to the *wrong*
+            base waveform (e.g. an un-rescaled ``"x180"`` shared with other,
+            un-swept occurrences of the same shape elsewhere in the
+            sequence), not a bug ``parameters`` alone can fix since it only
+            overrides the *field*, not which operation it applies to.
+        average: Forwarded to every acquisition group this call creates --
+            ``True`` selects ``AveragingMode.CYCLIC`` (averaged across
+            shots at ``.download()`` time), ``False`` (default) selects
+            ``SINGLESHOT`` (every shot kept), mirroring qibolab's own
+            ``create_acquisition``.
+        acquisition_type: Selects which acquisition class every ``Readout``
+            group in ``sequence`` is built as -- ``INTEGRATION`` (default)
+            for :class:`~.qua_acquisition.IntegratedAcquisition`,
+            ``DISCRIMINATION`` for :class:`~.qua_acquisition.
+            ShotsAcquisition` (``threshold``/``angle`` read straight off
+            the QuAM readout ``Pulse`` actually played). ``RAW`` is not yet
+            supported here.
 
     Returns:
         A callable accepting ``parameters``' names as its signature. Once
-        called (inside a QUA program), ``callable.acquisitions`` holds
-        ``{acquisition_id: (I, Q)}`` for every ``Readout`` played.
+        built, ``callable.acquisitions`` holds
+        ``{(operation, element): IntegratedAcquisition | ShotsAcquisition}``
+        -- one entry per distinct operation/element pair played as a
+        ``Readout`` in the sequence, already ``.declare()``d. A caller
+        drives the full multi-shot lifecycle: this function only calls
+        ``.declare()``; ``.download(*dims)``/``.fetch(handles)`` are the
+        caller's responsibility, once per program, after the shot loop
+        closes.
+
+    Raises:
+        NotImplementedError: If ``acquisition_type`` is
+            ``AcquisitionType.RAW``.
     """
     from qm import qua
 
+    if acquisition_type is AcquisitionType.RAW:
+        raise NotImplementedError(
+            "sequence_to_qua_macro does not support AcquisitionType.RAW yet "
+            "(v2 follow-up, see the Option-A convergence plan)."
+        )
+
     parameters = dict(parameters or {})
-    for name, (_, field) in parameters.items():
-        if field not in _VALID_FIELDS:
-            raise ValueError(f"parameters[{name!r}]: field {field!r} must be one of {sorted(_VALID_FIELDS)}.")
+    for name, (_, target_field) in parameters.items():
+        if target_field not in _VALID_FIELDS:
+            raise ValueError(f"parameters[{name!r}]: field {target_field!r} must be one of {sorted(_VALID_FIELDS)}.")
+    operation_overrides = dict(operation_overrides or {})
 
     index = build_operation_index(machine)
     sig = Signature([SigParameter(name, SigParameter.POSITIONAL_OR_KEYWORD) for name in parameters])
+
+    def resolve_op_name(channel_id: str, pulse: QibolabPulse) -> Tuple[str, Optional[float]]:
+        """``_resolve_operation``, except a pulse instance named in
+        ``operation_overrides`` skips shape-matching entirely and plays the
+        forced operation, with no shape-derived ``amplitude_scale`` (the
+        caller is expected to override that too, via ``parameters``, if the
+        forced operation's own amplitude isn't already what's wanted)."""
+        forced = operation_overrides.get(pulse.id)
+        if forced is not None:
+            return forced, None
+        return _resolve_operation(machine, index, channel_id, pulse, register_missing=register_missing)
+
+    # Group every Readout by (operation, element) and declare each group's
+    # acquisition once, now -- not per shot. Resolving op_name here (rather
+    # than only inside qua_macro's per-call body below) also means any
+    # missing operation this pass needs gets registered now; qua_macro's own
+    # later re-resolution of the same (channel_id, pulse) shape is then a
+    # pure cache hit, so nothing new gets registered mid-shot-loop.
+    def make_acquisition(op_name: str, channel) -> "IntegratedAcquisition | ShotsAcquisition":
+        if acquisition_type is AcquisitionType.DISCRIMINATION:
+            readout_pulse = (getattr(channel, "operations", None) or {}).get(op_name)
+            threshold = getattr(readout_pulse, "threshold", None)
+            angle = getattr(readout_pulse, "integration_weights_angle", None) or 0.0
+            return ShotsAcquisition(operation=op_name, element=channel.name, average=average, threshold=threshold, angle=angle)
+        return IntegratedAcquisition(operation=op_name, element=channel.name, average=average)
+
+    acquisitions: Dict[Tuple[str, str], "IntegratedAcquisition | ShotsAcquisition"] = {}
+    for channel_id, instruction in sequence:
+        if not isinstance(instruction, QibolabReadout):
+            continue
+        channel = naming.resolve_channel(machine, channel_id)
+        op_name, _ = resolve_op_name(channel_id, instruction.probe)
+        group = acquisitions.setdefault((op_name, channel.name), make_acquisition(op_name, channel))
+        group.keys.append(instruction.acquisition.id)
+    for group in acquisitions.values():
+        group.declare()
 
     def qua_macro(*args, **kwargs):
         bound = sig.bind(*args, **kwargs)
@@ -200,16 +298,13 @@ def sequence_to_qua_macro(
                     return values[name]
             return default
 
-        acquisitions: Dict[PulseId, tuple] = {}
         processed_aligns = set()
 
         for channel_id, instruction in sequence:
             channel = naming.resolve_channel(machine, channel_id)
 
             if isinstance(instruction, QibolabPulse):
-                op_name, amplitude_scale = _resolve_operation(
-                    machine, index, channel_id, instruction, register_missing=register_missing
-                )
+                op_name, amplitude_scale = resolve_op_name(channel_id, instruction)
                 amplitude_scale = override(instruction.id, "amplitude", amplitude_scale)
                 duration = override(instruction.id, "duration", None)
                 phase = override(instruction.id, "phase", instruction.relative_phase or None)
@@ -224,11 +319,9 @@ def sequence_to_qua_macro(
                     qua.reset_frame(channel.name)  # mirrors qibolab's own instructions._play
 
             elif isinstance(instruction, QibolabReadout):
-                op_name, amplitude_scale = _resolve_operation(
-                    machine, index, channel_id, instruction.probe, register_missing=register_missing
-                )
+                op_name, amplitude_scale = resolve_op_name(channel_id, instruction.probe)
                 amplitude_scale = override(instruction.probe.id, "amplitude", amplitude_scale)
-                acquisitions[instruction.acquisition.id] = channel.measure(op_name, amplitude_scale=amplitude_scale)
+                acquisitions[(op_name, channel.name)].measure(channel, amplitude_scale=amplitude_scale)
 
             elif isinstance(instruction, Delay):
                 cycles = override(instruction.id, "duration", None)
@@ -249,9 +342,7 @@ def sequence_to_qua_macro(
         if relaxation_time:
             qua.wait(int(relaxation_time) // 4)
 
-        qua_macro.acquisitions = acquisitions
-
     qua_macro.__signature__ = sig
     qua_macro.__name__ = "sequence_qua_macro"
-    qua_macro.acquisitions = {}
+    qua_macro.acquisitions = acquisitions
     return qua_macro

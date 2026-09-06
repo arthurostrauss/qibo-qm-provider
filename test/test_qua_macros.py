@@ -104,9 +104,84 @@ def test_sequence_to_qua_macro_readout_populates_acquisitions(mw_fem_machine):
         macro = sequence_to_qua_macro(mw_fem_machine, sequence)
         macro()
 
-    assert readout.acquisition.id in macro.acquisitions
-    i_var, q_var = macro.acquisitions[readout.acquisition.id]
-    assert i_var is not None and q_var is not None
+    assert len(macro.acquisitions) == 1
+    group = next(iter(macro.acquisitions.values()))
+    assert group.keys == [readout.acquisition.id]
+    assert group.i is not None and group.q is not None  # declare() already ran
+    assert group.istream is not None and group.qstream is not None
+
+
+def test_sequence_to_qua_macro_multiplexed_readout_shares_one_group(mw_fem_machine):
+    """Two Readout occurrences on the same channel, playing a same-shaped
+    probe pulse (so they resolve to the same QuAM operation), land in one
+    shared IntegratedAcquisition keyed by (operation, element) -- mirrors
+    qibolab's own multiplexed-readout grouping (QmController.
+    register_acquisitions, controller.py:575-581), which the stream-
+    processing this group feeds (declare/buffer/average) needs to happen
+    once per group, not once per Readout."""
+    probe = Pulse(duration=1000, amplitude=0.1, envelope=Rectangular())
+    readout1 = Readout(acquisition=Acquisition(duration=1000), probe=probe)
+    readout2 = Readout(acquisition=Acquisition(duration=1000), probe=probe.model_copy())
+    sequence = PulseSequence(
+        [
+            (channel_id("mw0", "acquisition"), readout1),
+            (channel_id("mw0", "acquisition"), readout2),
+        ]
+    )
+
+    with qua.program():
+        macro = sequence_to_qua_macro(mw_fem_machine, sequence)
+        macro()
+
+    assert len(macro.acquisitions) == 1
+    group = next(iter(macro.acquisitions.values()))
+    assert group.keys == [readout1.acquisition.id, readout2.acquisition.id]
+    assert group.npulses == 2
+
+
+def test_sequence_to_qua_macro_discrimination_builds_shots_acquisition(mw_fem_machine):
+    """``acquisition_type=DISCRIMINATION`` groups Readouts into a
+    ShotsAcquisition instead of an IntegratedAcquisition, with
+    ``threshold``/``angle`` read from the QuAM readout pulse actually
+    played -- ``mw0``'s ``"readout"`` op is registered in ``conftest.py``
+    with ``threshold=0.001, integration_weights_angle=1.2``."""
+    from qibolab._core.execution_parameters import AcquisitionType
+
+    from qibo_qm_provider.qibolab_bridge.qua_acquisition import ShotsAcquisition
+
+    probe = Pulse(duration=1000, amplitude=0.1, envelope=Rectangular())
+    readout = Readout(acquisition=Acquisition(duration=1000), probe=probe)
+    sequence = PulseSequence([(channel_id("mw0", "acquisition"), readout)])
+
+    with qua.program():
+        macro = sequence_to_qua_macro(mw_fem_machine, sequence, acquisition_type=AcquisitionType.DISCRIMINATION)
+        macro()
+
+    assert len(macro.acquisitions) == 1
+    group = next(iter(macro.acquisitions.values()))
+    assert isinstance(group, ShotsAcquisition)
+    assert group.threshold == pytest.approx(0.001)
+    assert group.angle == pytest.approx(1.2)
+    assert group.shot is not None  # declare() already ran
+    assert group.shots is not None
+
+
+def test_sequence_to_qua_macro_discrimination_without_threshold_raises(mw_fem_machine):
+    """A readout pulse with no ``threshold`` set (e.g. an un-calibrated
+    channel) must fail loudly at acquisition-group construction time, not
+    silently compare against ``None`` deep inside QUA."""
+    from qibolab._core.execution_parameters import AcquisitionType
+
+    channel = mw_fem_machine.qubits["mw0"].resonator
+    channel.operations["readout"].threshold = None
+
+    probe = Pulse(duration=1000, amplitude=0.1, envelope=Rectangular())
+    readout = Readout(acquisition=Acquisition(duration=1000), probe=probe)
+    sequence = PulseSequence([(channel_id("mw0", "acquisition"), readout)])
+
+    with qua.program():
+        with pytest.raises(ValueError, match="threshold"):
+            sequence_to_qua_macro(mw_fem_machine, sequence, acquisition_type=AcquisitionType.DISCRIMINATION)
 
 
 def test_sequence_to_qua_macro_amplitude_parameter_override(mw_fem_machine):
