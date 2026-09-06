@@ -30,7 +30,6 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from qibolab import Platform
-from qibolab._core.instruments.qm import QmController
 from qibolab._core.instruments.qm.components import QmConfigs
 from qibolab._core.parameters import ConfigKinds, NativeGates, Parameters, Settings
 from quam.core import QuamRoot
@@ -38,6 +37,7 @@ from quam.core import QuamRoot
 from ..exceptions import MissingQuamAttributeError, UnsupportedWiringError
 from .iqcc_controller import IQCCQmController
 from .platform_naming import IqccSource, parse_platform_name
+from .quam_controller import QuamQmController
 from .quam_platform_conversion import _build_couplers, _build_native_gates, _build_qubits
 from .quam_wiring import build_qm_wiring
 
@@ -103,9 +103,13 @@ def _resolve_controller_class(machine: QuamRoot) -> type:
     Reuses ``quam_builder``'s own private resolution helper
     (``Quam._get_qmm_class``) rather than re-deriving its
     ``use_custom_qmm``/``qmm_class`` branching here, so this can never drift
-    from what ``connect()`` itself would do. Deliberately fails soft (falls
-    back to the plain ``QmController``, today's unconditional behavior) on
-    any resolution problem -- a bad ``qmm_class``/missing
+    from what ``connect()`` itself would do. Always resolves to a
+    ``QuamQmController`` subclass -- never a bare ``QmController`` -- so
+    ``machine.initialize_qpu()`` propagates through ``play()`` regardless of
+    whether the machine is locally-wired or IQCC-fetched (see
+    ``quam_controller``'s module docstring). Deliberately fails soft (falls
+    back to the plain ``QuamQmController``, i.e. local execution) on any
+    ``qmm_class`` resolution problem -- a bad ``qmm_class``/missing
     ``iqcc_cloud_client`` should surface at ``connect()`` time, exactly as it
     did before this function existed, not block ``Platform`` construction.
     """
@@ -113,29 +117,30 @@ def _resolve_controller_class(machine: QuamRoot) -> type:
         get_qmm_class = getattr(machine, "_get_qmm_class", None)
         qmm_class = get_qmm_class() if get_qmm_class is not None else None
     except Exception:  # noqa: BLE001 - see docstring: fail soft, let connect() raise later.
-        return QmController
+        return QuamQmController
     if qmm_class is None:
-        return QmController
+        return QuamQmController
     try:
         from iqcc_cloud_client.qmm_cloud import CloudQuantumMachinesManager
     except ImportError:
-        return QmController
-    return IQCCQmController if issubclass(qmm_class, CloudQuantumMachinesManager) else QmController
+        return QuamQmController
+    return IQCCQmController if issubclass(qmm_class, CloudQuantumMachinesManager) else QuamQmController
 
 
 def _build_qm_controller(machine: QuamRoot, *, port: Optional[int] = None):
-    """Build a qibolab ``QmController`` (or ``IQCCQmController``) + matching
+    """Build a qibolab ``QuamQmController`` (or ``IQCCQmController``) + matching
     ``configs`` from a QuAM object's wiring.
 
     The actual channel/config conversion lives in
     ``quam_wiring.build_qm_wiring``; this function only assembles the
-    controller itself (``address``, ``cluster_name``, ``fems``, and --
-    exclusively for ``IQCCQmController`` -- ``machine``) from
-    ``machine.network``. Which controller class gets built is decided by
+    controller itself (``address``, ``cluster_name``, ``fems``, ``machine``)
+    from ``machine.network``. Which controller class gets built is decided by
     :func:`_resolve_controller_class`, from that same ``network`` config --
     the identical, config-driven distinction ``machine.connect()`` itself
     makes, so a locally-wired machine and an IQCC-fetched one need no
-    separate call path here.
+    separate call path here -- both classes returned by
+    :func:`_resolve_controller_class` require ``machine``, so it is always
+    passed.
 
     Args:
         machine: The QuAM root to wire.
@@ -168,13 +173,12 @@ def _build_qm_controller(machine: QuamRoot, *, port: Optional[int] = None):
 
     channels, configs, fems = build_qm_wiring(machine)
     controller_cls = _resolve_controller_class(machine)
-    extra = {"machine": machine} if controller_cls is IQCCQmController else {}
     controller = controller_cls(
         address=f"{host}:{resolved_port}",
         cluster_name=network.get("cluster_name"),
         channels=channels,
         fems=fems,
-        **extra,
+        machine=machine,
     )
     return controller, configs
 
@@ -279,6 +283,7 @@ def _create_iqcc_with_machine(
     # dependencies of this module's own import-time surface, matching this
     # codebase's existing convention for iqcc_cloud_client-adjacent code.
     from qiskit_qm_provider.providers.iqcc_cloud_provider import get_machine_from_iqcc
+    from qibo_qm_provider import add_basic_macros
 
     try:
         machine, _ = get_machine_from_iqcc(
@@ -287,6 +292,7 @@ def _create_iqcc_with_machine(
             quam_state_folder_path=resolved_state_path,
             quam_cls=quam_cls,
         )
+        add_basic_macros(machine)
     except (ValueError, ConnectionError) as exc:
         raise ValueError(
             f"IQCC backend {source.backend_name!r} (from platform name {name!r}) "

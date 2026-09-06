@@ -90,13 +90,26 @@ def test_instruments_and_channels_populated_for_every_qubit(backend):
 
 
 def test_generated_config_matches_quam_ground_truth(backend):
-    """Diffs qibolab's generated QM config against QuAM's own
-    ``generate_config()`` for one qubit per readout bank. Only the
-    known-and-warned-about differences (flux `offset`/`filter.feedforward`,
-    absent `delay`/`shareable`) are expected to differ -- everything else
-    (port tuples, signed `intermediate_frequency`, `time_of_flight`,
-    `smearing`, FEM `type`, `band`, `full_scale_power_dbm`, `upconverter`)
-    must match exactly.
+    """Diffs qibolab's *wiring-time* generated config (built directly via
+    ``controller.configure_channel``, independent of ``play()``) against
+    QuAM's own ``generate_config()`` for one qubit per readout bank.
+
+    Scope note (Option-A convergence): since ``QuamQmController.play()``
+    now sends ``machine.generate_config()`` verbatim as the wire config
+    (see ``quam_controller``'s module docstring), this test no longer
+    verifies *execution-time* config correctness -- that's covered,
+    exactly and without the known carve-outs below, by
+    ``test_compiles_real_native_gate_sequence_offline``'s
+    ``result["config"] == backend.machine.generate_config()`` check. What
+    this test still verifies: ``Platform.channels``/``parameters.configs``
+    (built by ``quam_wiring.build_qm_wiring``, used for Qibocal
+    ``Sweeper.channels`` addressing and topology inspection, independent of
+    who authors the wire bytes) stay numerically consistent with QuAM's own
+    truth. Only the known-and-warned-about differences (flux
+    `offset`/`filter.feedforward`, absent `delay`/`shareable`) are expected
+    to diverge -- everything else (port tuples, signed
+    `intermediate_frequency`, `time_of_flight`, `smearing`, FEM `type`,
+    `band`, `full_scale_power_dbm`, `upconverter`) must match exactly.
     """
     platform = backend.platform
     controller = platform.instruments["qm"]
@@ -130,9 +143,9 @@ def test_generated_config_matches_quam_ground_truth(backend):
 
 def test_compiles_real_native_gate_sequence_offline(backend):
     """Builds a PulseSequence for one qubit's real, calibrated RX native and
-    plays it with ``manager=None`` (no hardware connection) -- qibolab
-    returns the QUA program/config instead of executing
-    (``controller.py:666-670``).
+    plays it with ``manager=None`` (no hardware connection) -- the new
+    ``QuamQmController.play()`` returns the QUA program/config instead of
+    executing (``quam_controller.py``'s ``manager is None`` branch).
 
     Builds that one qubit's native via
     ``quam_platform_conversion._single_qubit_natives`` directly (rather than
@@ -142,18 +155,31 @@ def test_compiles_real_native_gate_sequence_offline(backend):
     during that whole-machine pass, unrelated to whether ``qA1`` itself is
     fine). This isolates the check to exactly the qubit under test.
 
-    Confirms the amplitude-unit fix (Step 0) lands correctly end to end,
-    regardless of which envelope path a given qubit's x180 takes (arbel uses
-    DragCosinePulse -- the sampled `Custom` fallback, `amplitude=1.0` with
-    everything baked into the samples -- but this check is written to work
-    identically for a symbolic Rectangular/Gaussian pulse too): the peak
-    realizable voltage qibolab's pulse would produce (`envelope * amplitude
-    * max_voltage`) must match QuAM's own calibrated peak voltage
-    (`calculate_waveform()`'s peak), since both ultimately describe the same
-    physical x180 pulse.
+    Two checks, both now meaningful for a different reason than before the
+    Option-A convergence:
+
+    1. ``result["config"] == backend.machine.generate_config()`` -- exact
+       equality, not a diff-with-known-exceptions like
+       ``test_generated_config_matches_quam_ground_truth`` still carries.
+       This is the direct, strongest-available proof that the flux-filter
+       double-application and TWPA ``initialize_qpu()``/``sticky`` bugs
+       (see ``flux_filter_double_application_issue.md``, and this
+       session's TWPA investigation) are structurally gone: the executed
+       config is *always* QuAM's own generator's output now, for every
+       qubit/port, not just the ones this test happens to touch.
+    2. The peak realizable voltage qibolab's compiled ``RX`` pulse would
+       produce (`envelope * amplitude * max_voltage`) still must match
+       QuAM's own calibrated peak voltage (`calculate_waveform()`'s peak)
+       -- this one is close to tautological now (the qubit's ``x180``
+       shape matches an already-registered QuAM operation, so
+       ``sequence_to_qua_macro`` just plays that operation directly,
+       unchanged, rather than re-deriving a waveform from the qibolab
+       ``Pulse``), but kept as an explicit regression guard: it would only
+       fail if a future change made the macro path stop reusing an
+       existing operation for a matching shape.
     """
     import numpy as np
-    from qibolab._core.execution_parameters import ExecutionParameters
+    from qibolab._core.execution_parameters import AcquisitionType, ExecutionParameters
     from qibolab._core.sequence import PulseSequence
 
     from qibo_qm_provider.qibolab_bridge.quam_platform_conversion import _single_qubit_natives
@@ -183,10 +209,16 @@ def test_compiles_real_native_gate_sequence_offline(backend):
         # `default(self.relaxation_time, 0)` fallback lives on a different,
         # unrelated code path), so the field default of None would raise
         # `TypeError: '>' not supported between instances of 'NoneType' and 'int'`.
-        ExecutionParameters(nshots=1, relaxation_time=0),
+        # acquisition_type is explicit for clarity, even though this
+        # sequence has no Readout at all (so acquisition_type has no
+        # observable effect here): ExecutionParameters defaults to
+        # DISCRIMINATION, which is supported but pulls in ShotsAcquisition's
+        # threshold requirement for no reason in a drive-only sequence.
+        ExecutionParameters(nshots=1, relaxation_time=0, acquisition_type=AcquisitionType.INTEGRATION),
         [],
     )
     assert "program" in result and "config" in result
+    assert result["config"] == backend.machine.generate_config()
 
     # Pulse.i()/.q() take a *sampling rate* (samples per duration-unit), not a
     # sample count -- internally: `samples = int(self.duration * sampling_rate)`.

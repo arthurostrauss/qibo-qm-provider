@@ -1,5 +1,12 @@
-"""``IQCCQmController``: a ``qibolab`` ``QmController`` that executes through
-IQCC's cloud manager instead of a local ``QuantumMachinesManager``.
+"""``IQCCQmController``: a ``QuamQmController`` that executes through IQCC's
+cloud manager instead of a local ``QuantumMachinesManager``.
+
+Subclasses :class:`~.quam_controller.QuamQmController` (not ``QmController``
+directly) so that the whole QuAM-macro execution path -- ``initialize_qpu()``,
+``build_sweep_macro``, ``qua_config(machine)`` as the sole config authority --
+propagates through cloud execution the same way it does through local
+execution; only :meth:`connect`/:meth:`disconnect`/:meth:`play` below are
+IQCC's own concern: the cloud manager's execution shape.
 
 ``qibolab._core.instruments.qm.controller.QmController`` (unmodified) makes
 two hardcoded assumptions about ``self.manager``:
@@ -10,9 +17,7 @@ two hardcoded assumptions about ``self.manager``:
 * ``play()`` then assumes that manager's full *local* surface:
   ``manager.open_qm(config)`` returns a ``QuantumMachine`` with
   ``.compile(program) -> program_id`` and
-  ``.queue.add_compiled(program_id) -> QmPendingJob``, cached in a
-  strictly-typed ``Cache(machine: QuantumMachine | QmApiWithDeprecations, ...)``
-  pydantic model in between.
+  ``.queue.add_compiled(program_id) -> QmPendingJob``.
 
 ``iqcc_cloud_client.qmm_cloud.CloudQuantumMachinesManager``/
 ``CloudQuantumMachine`` expose none of that -- only a single, synchronous
@@ -20,13 +25,13 @@ two hardcoded assumptions about ``self.manager``:
 ``compile``/``queue`` at all. Verified directly (not assumed) that everything
 *around* that gap already works unmodified against the cloud classes:
 ``CloudQuantumMachinesManager.open_qm(config)`` matches
-``QmController.play()``'s call exactly, and every
-``qibolab._core.instruments.qm.program.acquisition.Acquisition.fetch``
-implementation only ever calls ``handles.get(name).fetch_all()``, which
-``CloudResultHandles``/``CloudResult`` already implement (``wait_for_all_values``
-is a documented no-op on the cloud side too). So the only code that needs
-replacing is the "compile, then queue, then wait" sandwich in the middle --
-not the registration steps before it or the result-fetching after it.
+``QuamQmController.play()``'s call exactly, and
+:func:`~.qua_acquisition.IntegratedAcquisition.fetch` only ever calls
+``handles.get(name).fetch_all()``, which ``CloudResultHandles``/
+``CloudResult`` already implement (``wait_for_all_values`` is a documented
+no-op on the cloud side too). So the only code that needs replacing is the
+"compile, then queue, then wait" sandwich in the middle -- not the program-
+building steps before it or the result-fetching after it.
 
 Why this is IQCC-specific, not a generic "cloud-capable" base class
 --------------------------------------------------------------------
@@ -40,21 +45,23 @@ of a new, independent subclass the next provider can write on its own terms.
 from __future__ import annotations
 
 import warnings
-from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Dict, List
 
 from pydantic import Field
-from qibolab._core.components import Config, DcChannel
-from qibolab._core.execution_parameters import ExecutionParameters
+from qibolab._core.components import Config
+from qibolab._core.execution_parameters import AcquisitionType, AveragingMode, ExecutionParameters
 from qibolab._core.identifier import Result
-from qibolab._core.instruments.qm import QmController
-from qibolab._core.instruments.qm.controller import Experiment, _batch, _unroll_sequences, fetch_results
-from qibolab._core.instruments.qm.program import ExecutionArguments, program
+from qibolab._core.instruments.qm.controller import _batch, _unroll_sequences
 from qibolab._core.pulses.pulse import PulseId
 from qibolab._core.sequence import PulseSequence
 from qibolab._core.sweeper import ParallelSweepers
-from qm import generate_qua_script
-from quam.core import QuamRoot
+from qm import generate_qua_script, qua
+from qm.qua import declare, for_
+
+from .qm_config_source import qua_config
+from .qua_acquisition import fetch_results
+from .qua_sweep import build_sweep_macro
+from .quam_controller import QuamQmController
 
 if TYPE_CHECKING:
     from iqcc_cloud_client.qmm_cloud import CloudQuantumMachinesManager
@@ -62,20 +69,20 @@ if TYPE_CHECKING:
 __all__ = ["IQCCQmController"]
 
 
-class IQCCQmController(QmController):
-    """A ``QmController`` whose manager/execution come from IQCC's cloud SDK.
+class IQCCQmController(QuamQmController):
+    """A ``QuamQmController`` whose manager/execution come from IQCC's cloud SDK.
 
-    Built the same way as a plain ``QmController`` (``address``/``channels``/
-    ``fems``/``config`` -- ``address`` is kept only for
+    Built the same way as a plain ``QuamQmController`` (``address``/
+    ``channels``/``fems``/``machine`` -- ``address`` is kept only for
     ``Instrument.signature`` and is never used to build the manager here),
-    plus one required extra field:
+    plus two IQCC-specific extra fields:
 
     Attributes:
-        machine: The source QuAM object. ``connect()`` delegates to
-            ``machine.connect()`` (``quam_builder``'s own, unmodified
-            config-driven resolution of ``network.qmm_class``/
-            ``network.qmm_settings``) rather than re-deriving IQCC connection
-            details here -- the same resolution
+        machine: (Inherited from ``QuamQmController``.) The source QuAM
+            object. ``connect()`` delegates to ``machine.connect()``
+            (``quam_builder``'s own, unmodified config-driven resolution of
+            ``network.qmm_class``/``network.qmm_settings``) rather than
+            re-deriving IQCC connection details here -- the same resolution
             ``qiskit_qm_provider.QMBackend.qmm`` already relies on for the
             OpenQASM path, so a machine's own state decides local vs. IQCC,
             not this class.
@@ -87,7 +94,6 @@ class IQCCQmController(QmController):
         terminal_output: Forwarded to ``CloudQuantumMachine.execute`` verbatim.
     """
 
-    machine: QuamRoot
     execute_options: Dict[str, Any] = Field(default_factory=dict)
     terminal_output: bool = False
 
@@ -142,23 +148,26 @@ class IQCCQmController(QmController):
         options: ExecutionParameters,
         sweepers: List[ParallelSweepers],
     ) -> Dict[PulseId, Result]:
-        """Same channel/pulse/acquisition/sweeper registration as
-        ``QmController.play()``, executed through
-        ``CloudQuantumMachine.execute()`` instead of the local SDK's
-        compile-then-queue-then-wait sequence.
+        """Same program-building as ``QuamQmController.play()``, executed
+        through ``CloudQuantumMachine.execute()`` instead of the local
+        SDK's compile-then-queue-then-wait sequence.
 
-        This is a near-complete copy of ``QmController.play()``'s body, not a
-        call to ``super().play()`` with ``self.manager`` swapped in: the base
-        method's own ``Cache`` is a strictly-typed pydantic model
-        (``machine: QuantumMachine | QmApiWithDeprecations``) that a
-        ``CloudQuantumMachine`` cannot satisfy (``arbitrary_types_allowed``
-        still validates by ``isinstance``), so the compile/queue/wait tail
-        has to be replaced outright rather than intercepted. Every call this
-        method makes to ``self.configure_channel(s)``/``register_pulses``/
-        ``register_acquisitions``/``preprocess_sweeps`` is the real,
-        inherited ``QmController`` method, unchanged -- only the final
-        "compile, then queue" step differs from upstream.
+        This is a near-complete copy of ``QuamQmController.play()``'s body,
+        not a call to ``super().play()`` with ``self.manager`` swapped in:
+        a ``CloudQuantumMachine`` has no ``.compile()``/``.queue`` at all,
+        so the compile/queue/wait tail has to be replaced outright rather
+        than intercepted. Every call this method makes to build the QUA
+        program (``initialize_qpu()``, ``build_sweep_macro``, the shot
+        loop, stream-processing download) is identical to the base class --
+        only the final "open, then execute" step differs from local
+        execution.
         """
+        if options.acquisition_type is AcquisitionType.RAW:
+            raise NotImplementedError(
+                f"{type(self).__name__}.play() does not support AcquisitionType.RAW yet -- "
+                "a documented v2 follow-up, see the Option-A convergence plan (repo root)."
+            )
+
         results: Dict[PulseId, Result] = {}
         for batched_sequences in _batch(sequences):
             if len(batched_sequences) == 0:
@@ -170,24 +179,32 @@ class IQCCQmController(QmController):
             if len(sequence) == 0:
                 return {}
 
-            for channel_id, channel in self.channels.items():
-                if isinstance(channel, DcChannel):
-                    self.configure_channel(channel_id, configs)
-            probe_map = self.configure_channels(configs, sequence.channels)
-            self.register_pulses(configs, sequence)
-            acquisitions = self.register_acquisitions(configs, sequence, options)
+            with qua.program() as qua_program:
+                self.machine.initialize_qpu()
+                n = declare(int)
+                run = build_sweep_macro(
+                    self.machine,
+                    sequence,
+                    sweepers,
+                    register_missing=True,
+                    average=options.averaging_mode is AveragingMode.CYCLIC,
+                    relaxation_time=options.relaxation_time,
+                    acquisition_type=options.acquisition_type,
+                )
+                with for_(n, 0, n < options.nshots, n + 1):
+                    run()
+                # See QuamQmController.play()'s identical computation: direct
+                # port of qibolab's own `[::-1][int(has_iq):]` slice.
+                has_iq = options.acquisition_type is AcquisitionType.INTEGRATION
+                buffer_dims = options.results_shape(sweepers)[::-1][int(has_iq):]
+                with qua.stream_processing():
+                    for acquisition in run.acquisitions.values():
+                        acquisition.download(*buffer_dims)
 
-            args = ExecutionArguments(sequence, acquisitions, options.relaxation_time)
-            self.preprocess_sweeps(sweepers, configs, args, probe_map)
-            qua_program = program(args, options, sweepers)
-            self.experiment = Experiment(
-                configs={ch: configs[ch] for ch in configs.keys() & self.channels.keys()},
-                sequences=batched_sequences,
-                sweepers=sweepers,
-            )
+            config = qua_config(self.machine)
 
             if self.script_file_name is not None:
-                script = generate_qua_script(qua_program, asdict(self.config))
+                script = generate_qua_script(qua_program, config)
                 with open(self.script_file_name, "w") as file:
                     file.write(script)
 
@@ -196,9 +213,9 @@ class IQCCQmController(QmController):
                     "Not connected to Quantum Machines. Returning program and config.",
                     stacklevel=2,
                 )
-                return {"program": qua_program, "config": asdict(self.config)}
+                return {"program": qua_program, "config": config}
 
-            cloud_qm = self.manager.open_qm(asdict(self.config))
+            cloud_qm = self.manager.open_qm(config)
             job = cloud_qm.execute(
                 qua_program,
                 terminal_output=self.terminal_output,
@@ -206,5 +223,5 @@ class IQCCQmController(QmController):
             )
             handles = job.result_handles
             handles.wait_for_all_values()
-            results |= fetch_results(handles, acquisitions.values())
+            results |= fetch_results(handles, run.acquisitions.values())
         return results
