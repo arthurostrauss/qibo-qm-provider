@@ -138,6 +138,30 @@ def test_rz_macro_contributes_no_native(add_basic_macros_installed):
     assert not hasattr(natives.single_qubit["q0"], "RZ")
 
 
+def test_out_of_range_macro_only_drops_its_own_native(add_basic_macros_installed):
+    """A single miscalibrated macro (here q0's 'x' pulse, pushed to 0.6 V --
+    above the 0.5 V default direct max_voltage) must not take down the whole
+    qubit's native set, let alone the whole platform's: q0's otherwise-valid
+    'sx' (RX90) macro is read from an independent QuAM pulse and has nothing
+    to do with 'x' (RX) being out of range, so it must still convert.
+
+    Regression test for the bug this fixes: before, this raised
+    AmplitudeOutOfRangeError out of `_build_native_gates` itself, aborting
+    native-gate conversion for every qubit on the platform -- not just q0,
+    and not just its RX.
+    """
+    add_basic_macros_installed.qubits["q0"].xy.operations["x180"].amplitude = 0.6
+
+    with pytest.warns(UserWarning, match=r"Qubit 'q0'.*native 'RX'.*macro 'x'") as record:
+        natives = _build_native_gates(add_basic_macros_installed)
+
+    assert not any("RX90" in str(w.message) for w in record.list)
+    assert not hasattr(natives.single_qubit["q0"], "RX") or natives.single_qubit["q0"].RX is None
+    assert natives.single_qubit["q0"].RX90 is not None
+    # q1 is untouched by q0's out-of-range pulse.
+    assert natives.single_qubit["q1"].RX is not None
+
+
 def test_cz_native_uses_moving_qubit_flux_channel(add_basic_macros_installed):
     """The installed CZGate's flux_pulse_qubit resolves directly to a real
     QuAM Pulse object (verified empirically, not a string needing a

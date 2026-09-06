@@ -34,6 +34,7 @@ conversion directions stay consistent by construction.
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 from qibolab._core.native import SingleQubitNatives, TwoQubitNatives
@@ -41,7 +42,7 @@ from qibolab._core.parameters import NativeGates
 from qibolab._core.pulses.pulse import Acquisition, Readout as QibolabReadout
 from qibolab._core.qubits import Qubit, QubitMap
 
-from ..exceptions import MissingQuamAttributeError
+from ..exceptions import AmplitudeOutOfRangeError, MissingQuamAttributeError, UnsupportedEnvelopeError
 from .naming import MACRO_NAME_TO_SINGLE_QUBIT_NATIVE, MACRO_NAME_TO_TWO_QUBIT_NATIVE, channel_id
 from .quam_pulses import max_voltage_for_channel, quam_envelope_to_qibolab_pulse
 
@@ -118,6 +119,14 @@ def _single_qubit_natives(quam_qubit) -> SingleQubitNatives:
     stored pulse, matching Qibolab's own convention -- confirmed: qibolab's
     ``SingleQubitNatives`` model fields are ``RX, RX90, RX12, MZ, CP``, none
     of which is "RZ").
+
+    A macro whose pulse fails to convert (``AmplitudeOutOfRangeError``,
+    ``UnsupportedEnvelopeError`` -- see ``quam_pulses.py``) only drops that
+    one native field, with a warning; it does not abort the whole qubit (let
+    alone the whole platform). This matters in practice: a qubit's ``x``
+    (``RX``) pulse being miscalibrated/out-of-range must not take down its
+    otherwise-fine ``sx`` (``RX90``) native too, since the two are read from
+    independent macros here and callers may only care about one of them.
     """
     from qibolab._core.native import Native
 
@@ -141,7 +150,16 @@ def _single_qubit_natives(quam_qubit) -> SingleQubitNatives:
                 f"({sorted(channel.operations)})."
             )
         quam_pulse = channel.operations[pulse_name]
-        pulse = quam_envelope_to_qibolab_pulse(quam_pulse, max_voltage_for_channel(channel))
+        try:
+            pulse = quam_envelope_to_qibolab_pulse(quam_pulse, max_voltage_for_channel(channel))
+        except (AmplitudeOutOfRangeError, UnsupportedEnvelopeError) as exc:
+            warnings.warn(
+                f"Qubit {quam_qubit.id!r}: native {native_field!r} (macro {macro_name!r}, "
+                f"pulse {pulse_name!r}) could not be converted to a qibolab Pulse -- "
+                f"omitting only this native gate for this qubit. {exc}",
+                stacklevel=2,
+            )
+            continue
 
         if is_measure:
             ch_id = channel_id(quam_qubit.id, "acquisition")
@@ -184,7 +202,16 @@ def _two_qubit_natives(pair) -> TwoQubitNatives:
             continue
 
         moving_qubit = pair.qubit_control if getattr(pair, "moving_qubit", "control") == "control" else pair.qubit_target
-        pulse = quam_envelope_to_qibolab_pulse(flux_pulse, max_voltage_for_channel(moving_qubit.z))
+        try:
+            pulse = quam_envelope_to_qibolab_pulse(flux_pulse, max_voltage_for_channel(moving_qubit.z))
+        except (AmplitudeOutOfRangeError, UnsupportedEnvelopeError) as exc:
+            warnings.warn(
+                f"Pair {pair.name!r}: native {native_field!r} (macro {macro_name!r}) "
+                f"could not be converted to a qibolab Pulse -- omitting only this "
+                f"native gate for this pair. {exc}",
+                stacklevel=2,
+            )
+            continue
         ch_id = channel_id(moving_qubit.id, "flux")
         fields[native_field] = Native([(ch_id, pulse)])
 
