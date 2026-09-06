@@ -239,13 +239,24 @@ roughly in the order that unblocks the most:
 1. Live-hardware verification of `IQCCQmController` against real IQCC
    execution (built and offline-verified 2026-09-03; no IQCC credentials
    available in this session).
-2. A scaffolding tool that writes the `qibo-qm-{local,iqcc-<name>}` folder +
-   `quam_source.json` pair `qibolab.create_platform` needs for name-based
-   resolution — `create_iqcc`/`create_local` already implement everything
-   else this needs.
+2. ~~A scaffolding tool that writes the `qibo-qm-{local,iqcc-<name>}` folder~~
+   **Done (2026-09-06)**: `qibo_qm_provider.qibolab_bridge.scaffold` writes
+   the `platform.py`+`quam_source.json` pair (plus a CLI), closing
+   `$QIBOLAB_PLATFORMS` name-based resolution. See
+   [`INTEGRATION_STATUS.md`](INTEGRATION_STATUS.md)'s "Platform-folder
+   scaffolding" section. Note this is a convenience for name-string
+   resolution specifically (a runcard's `platform:` field,
+   `qibo.set_backend(..., platform=...)`) — it was never required just to
+   run a Qibocal node: `Executor.create` accepts an already-built `Platform`
+   instance directly (`QiboQMPlatformBackend.from_local(...)`/`.from_iqcc(...)`
+   already return one), bypassing name resolution entirely.
 3. `CalibrationBinding` declarations against a first qua-libs node (e.g.
    `05_T1` or `03a_qubit_spectroscopy`), and the Qibocal-operation-ID → node
-   resolution mechanism the note specifies.
+   resolution mechanism the note specifies — lower priority than first
+   thought: `QiboQMPlatformBackend`'s native sweeper support (frequency,
+   offset, amplitude, duration_interpolated, phase — see `qua_sweep.py`)
+   already covers the sweeper shapes most Qibocal nodes use, without this
+   layer.
 4. Extracting the SDK-neutral `ParameterTable` core the note describes
    (`Qibo`/QASM source adapters against a shared spec, rather than a Qibo
    adapter against `qiskit_qm_provider`'s own concrete class).

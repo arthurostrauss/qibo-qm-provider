@@ -9,6 +9,7 @@ called out explicitly rather than by silently editing history.
 
 | Date | Slice | Section |
 |---|---|---|
+| 2026-09-06 | `scaffold.py`: writes the `platform.py`+`quam_source.json` folder pair `$QIBOLAB_PLATFORMS` name resolution needs; CLI added | [Platform-folder scaffolding: `$QIBOLAB_PLATFORMS` resolution closed](#platform-folder-scaffolding-qibolab_platforms-resolution-closed-2026-09-06) |
 | 2026-09-03 | `IQCCQmController`: `QmController` subclass executing through IQCC's cloud manager, dispatched automatically from the machine's own `network` config | [`IQCCQmController`: cloud execution for `QiboQMPlatformBackend`](#iqccqmcontroller-cloud-execution-for-qiboqmplatformbackend-2026-09-03) |
 | 2026-09-03 | Architecture audit against `architecture_preliminary_insights.md`; README rewritten with the two-path reuse boundary and code examples | [Architecture audit and README rewrite](#architecture-audit-and-readme-rewrite-2026-09-03) |
 | 2026-08-27 | Real "arbel" `CZ` failure root-caused to directional connectivity and no `wire_names` support; both fixed | [Two-qubit connectivity direction: `wire_names` support and a real "arbel" bug, found and fixed](#two-qubit-connectivity-direction-wire_names-support-and-a-real-arbel-bug-found-and-fixed-2026-08-27) |
@@ -31,6 +32,60 @@ Companion documents: `symbolic_circuit_lowering.md` (the 2026-08-26 path, in
 depth, plus the findings and compromises behind it), `slice2_plan.md` (what is
 next for it), `qibo_backend_vs_qibolab_platform.md`,
 `qibolab_platform_from_quam_plan.md`, `qibocal_multi_qubit_handling.md`.
+
+## Platform-folder scaffolding: `$QIBOLAB_PLATFORMS` resolution closed (2026-09-06)
+
+Closes the gap this document's own "Platform name resolution" section
+(2026-08-23, below) and `platform_registration_guidelines.md` §9 both named:
+nothing wrote the `platform.py`+`quam_source.json` pair to disk, so
+name-based resolution (a Qibocal runcard's `platform:` field,
+`qibo.set_backend(..., platform="qibo-qm-iqcc-arbel")`) had no folder to
+resolve even though `create_iqcc`/`create_local`/`quam_to_qibolab_platform`
+already worked against real hardware.
+
+`qibo_qm_provider/qibolab_bridge/scaffold.py` adds
+`scaffold_iqcc_platform(backend_name, dest_dir, *, quam_class=None,
+validate=True, api_token=None)` and `scaffold_local_platform(state_path,
+dest_dir, *, quam_class=None)`, plus a CLI
+(`python -m qibo_qm_provider.qibolab_bridge.scaffold {iqcc,local} ...`,
+defaulting `--dest` to `~/.qibolab/platforms` per
+`platform_registration_guidelines.md` §2's recommendation). Both functions
+compute the folder name through `platform_naming` only, write the two-line
+`platform.py` stub and `quam_source.json` shown in
+`qibolab_platform_from_quam_plan.md` §2 verbatim, and:
+
+- **IQCC**: `validate=True` (default) immediately calls `create_iqcc` once
+  after writing, so a typo'd/unreachable backend name is caught at scaffold
+  time (`ValueError`, matching `create_iqcc`'s existing contract), and
+  prints whether the resulting `Platform.instruments` came back populated —
+  per §7, not every wired machine builds working instruments, and that
+  should be visible immediately rather than discovered mid-experiment.
+- **Local**: never copies the referenced state directory's contents — only
+  records its resolved absolute path in `quam_source.json` — so the
+  scaffolded folder can't become a second, driftable copy of calibration
+  data the user's own tooling still owns (§5).
+
+**One correction to `platform_registration_guidelines.md` §9**: its listed
+signature for the local scaffolder included a `label=None` parameter,
+anticipating a future `qibo-qm-local-<label>` multi-rig grammar. Not
+built — `platform_naming.py`'s grammar is deliberately singular for
+`qibo-qm-local` in this version, and `test_platform_naming.py`'s own
+`test_rejects_invalid_names` already locks in rejecting
+`"qibo-qm-local-extra"` as an invalid name. Implemented the local
+scaffolder against the grammar as it's actually built and tested, not the
+speculative extension; nothing here blocks adding it later if a second
+local rig is ever needed.
+
+Not built (separate, smaller follow-ups §9 also named, still open): the
+`refresh`/offline parameter on `create_iqcc` (item 4 — every scaffolded-IQCC
+`create()` call still re-fetches live), and confirming the IQCC token
+env-var name against installed `iqcc_cloud_client` source (item 5).
+
+Tested: `test/test_scaffold.py` (6 tests — folder contents for both kinds,
+the never-copy-local-state property, and both the happy and failing IQCC
+validation paths, mocking `get_machine_from_iqcc` the same way
+`test_platform_from_quam.py` already does). Full suite: 273 passed, no
+regressions.
 
 ## `IQCCQmController`: cloud execution for `QiboQMPlatformBackend` (2026-09-03)
 
