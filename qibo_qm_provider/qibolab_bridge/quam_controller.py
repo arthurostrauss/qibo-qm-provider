@@ -89,7 +89,7 @@ class QuamQmController(QmController):
         sequences: List[PulseSequence],
         options: ExecutionParameters,
         sweepers: List[ParallelSweepers],
-    ) -> Dict[PulseId, Result]:
+    ) -> Dict[PulseId, Result] | Dict[str, object]:
         """Play ``sequences`` against ``self.machine``, batched the same
         way qibolab's own ``QmController.play()`` batches them
         (``_batch``/``_unroll_sequences``, unchanged -- both operate on
@@ -117,7 +117,7 @@ class QuamQmController(QmController):
         results: Dict[PulseId, Result] = {}
         for batched_sequences in _batch(sequences):
             if len(batched_sequences) == 0:
-                return {}
+                continue
             elif len(batched_sequences) == 1:
                 sequence = batched_sequences[0]
             else:

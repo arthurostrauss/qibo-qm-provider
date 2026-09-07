@@ -55,7 +55,7 @@ class QiboQMBackend(NumpyBackend):
         name: Optional[str] = None,
     ):
         super().__init__()
-        self.name = "qibo-qm-provider"
+        self.name = name or "qibo-qm-provider"
         self._qiskit_backend = QMBackend(machine, qmm=qmm, init_macro=init_macro, name=name)
 
     @classmethod

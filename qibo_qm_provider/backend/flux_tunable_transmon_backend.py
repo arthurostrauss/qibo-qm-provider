@@ -42,7 +42,7 @@ class FluxTunableTransmonBackend(QiboQMBackend):
         from qibo.backends import NumpyBackend
 
         NumpyBackend.__init__(self)
-        self.name = "qibo-qm-provider"
+        self.name = name or "qibo-qm-provider"
         self._qiskit_backend = QiskitFluxTunableTransmonBackend(machine, qmm=qmm, name=name)
 
     def get_qubit_channels(self, qubit: Union[int, str]) -> Dict[str, object]:

@@ -147,7 +147,7 @@ class IQCCQmController(QuamQmController):
         sequences: List[PulseSequence],
         options: ExecutionParameters,
         sweepers: List[ParallelSweepers],
-    ) -> Dict[PulseId, Result]:
+    ) -> Dict[PulseId, Result] | Dict[str, object]:
         """Same program-building as ``QuamQmController.play()``, executed
         through ``CloudQuantumMachine.execute()`` instead of the local
         SDK's compile-then-queue-then-wait sequence.
@@ -171,7 +171,7 @@ class IQCCQmController(QuamQmController):
         results: Dict[PulseId, Result] = {}
         for batched_sequences in _batch(sequences):
             if len(batched_sequences) == 0:
-                return {}
+                continue
             if len(batched_sequences) == 1:
                 sequence = batched_sequences[0]
             else:
