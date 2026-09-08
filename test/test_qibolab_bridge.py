@@ -95,6 +95,37 @@ def test_qubits_filter_restricts_import(platform, fake_machine):
     assert fake_machine.qubits["1"].macros == {}
 
 
+def test_readout_macro_reads_threshold_from_acquisition_config(fake_machine):
+    """The qibolab Readout instruction carries no threshold/angle of its own
+    -- that calibration lives on the platform's acquisition-channel config
+    (``Platform.parameters.configs``) and must be plumbed through explicitly
+    (see native_import.py's ``acquisition_configs`` parameter). Exercises
+    ``_install_native_as_macro`` directly with a hand-built rectangular-probe
+    Readout, since the "dummy" platform's own MZ probe envelope is Gaussian
+    and would fall back to a plain WaveformPulse instead of a
+    threshold-carrying SquareReadoutPulse."""
+    from types import SimpleNamespace
+
+    from qibolab._core.native import Native
+    from qibolab._core.pulses.envelope import Rectangular
+    from qibolab._core.pulses.pulse import Acquisition, Pulse, Readout
+
+    from qibo_qm_provider.qibolab_bridge.native_import import _install_native_as_macro
+
+    readout = Readout(
+        acquisition=Acquisition(duration=1000), probe=Pulse(duration=1000, amplitude=0.1, envelope=Rectangular())
+    )
+    native = Native([("0/acquisition", readout)])
+    acq_config = SimpleNamespace(threshold=0.42, iq_angle=1.23)
+
+    q0 = fake_machine.qubits["0"]
+    _install_native_as_macro(native, "measure", q0, "test_0", {"0/acquisition": acq_config})
+
+    readout_pulse = q0.resonator.operations["test_0_measure"]
+    assert readout_pulse.threshold == pytest.approx(0.42)
+    assert readout_pulse.integration_weights_angle == pytest.approx(1.23)
+
+
 def test_missing_quam_qubit_is_skipped_not_raised(platform):
     machine = _FakeMachine(qubit_ids=[0], pair_ids=[])  # only "0" exists in machine.qubits
     with warnings.catch_warnings():

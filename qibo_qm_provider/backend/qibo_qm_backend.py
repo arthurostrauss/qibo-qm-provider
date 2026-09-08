@@ -15,6 +15,7 @@ and result fetching are all inherited unchanged by delegating to the wrapped
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 from qibo.backends import NumpyBackend
@@ -176,6 +177,17 @@ class QiboQMBackend(NumpyBackend):
             component = self._qiskit_backend.get_qubit_pair(qubits)
         else:
             component = self._qiskit_backend.get_qubit(qubits)
+        if name in component.macros:
+            warnings.warn(
+                f"register_gate({name!r}, ...) is overwriting an existing macro on "
+                f"{qubits!r} -- with the currently declared dependency floor "
+                "(qiskit-qm-provider>=0.3.4), the compiler's internal QUA-operation "
+                "cache may not see this update (see this method's docstring for the "
+                "OperationIdentifier identity-cache bug). Prefer installing macros on "
+                "the QuAM machine before constructing the backend when replacing an "
+                "existing name.",
+                stacklevel=2,
+            )
         component.macros[name] = macro
         self.update_target()
 

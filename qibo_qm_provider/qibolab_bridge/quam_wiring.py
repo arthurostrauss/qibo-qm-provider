@@ -46,11 +46,26 @@ dropping data:
   ``arbitrary``) at *runtime* in QUA (``set_all_fluxes``/``set_dc_offset``).
   A qibolab ``Platform`` has no such runtime prologue, so this converter
   writes the flux-point offset **statically** into ``OpxOutputConfig.offset``
-  instead -- correct for qibolab's execution model, but a deliberate
-  inversion of what QuAM's own ``generate_config()`` would emit, and it
-  means the platform's idle point is fixed at conversion time and will not
-  track a later ``machine.set_all_fluxes(...)`` call without rebuilding the
-  platform.
+  instead -- a deliberate inversion of what QuAM's own ``generate_config()``
+  would emit, and it means the platform's idle point is fixed at conversion
+  time and will not track a later ``machine.set_all_fluxes(...)`` call
+  without rebuilding the platform.
+
+**Config authority, post-Option-A.** The above was "correct for qibolab's
+execution model" only while a from-scratch qibolab ``Configuration`` was
+what actually got compiled onto hardware. It no longer is:
+``QuamQmController.play()``/``IQCCQmController.play()`` (see
+``quam_controller``'s module docstring) build the wire config exclusively
+from ``machine.generate_config()`` and never read ``Platform.parameters.
+configs`` for that purpose. So on that execution path, everything this
+module writes into ``configs`` -- flux offsets included -- is
+**inspection-only**: real for ``Platform.channels``/topology addressing and
+introspection, but a **silent no-op** for hardware. In particular, the
+classic Qibocal calibration-update pattern of mutating
+``platform.parameters.configs[channel_id].offset`` (or any other field)
+after the fact has no effect on what gets played -- update ``machine``
+itself (the QuAM object) instead, and treat ``configs`` here as a read-only
+snapshot of it.
 """
 
 from __future__ import annotations

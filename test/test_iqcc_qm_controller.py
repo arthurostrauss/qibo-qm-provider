@@ -201,6 +201,47 @@ def test_play_executes_through_the_cloud_manager_and_fetches_results(mw_fem_mach
     assert controller.manager.opened_configs[0] == mw_fem_machine.generate_config()
 
 
+def test_play_continues_past_an_all_empty_batch_and_keeps_later_results(mw_fem_machine, monkeypatch):
+    """Same regression as ``test_quam_controller.
+    test_play_continues_past_an_all_empty_batch_and_keeps_later_results``:
+    this class carries its own near-duplicate of the batch loop (see
+    ``IQCCQmController.play``'s docstring), so the ``continue``-not-
+    ``return {}`` fix on an all-empty batch has to be verified here too,
+    independently."""
+    import qibo_qm_provider.qibolab_bridge.iqcc_controller as iqcc_controller_module
+
+    channels, configs, fems = build_qm_wiring(mw_fem_machine)
+    controller = IQCCQmController(
+        address="1.2.3.4:9510",
+        cluster_name="test-cluster",
+        channels=channels,
+        fems=fems,
+        machine=mw_fem_machine,
+    )
+    controller.manager = _FakeCloudQuantumMachinesManager(backend="arbel")
+
+    drive_pulse = Pulse(duration=40, amplitude=0.2, envelope=Rectangular())
+    probe_pulse = Pulse(duration=1000, amplitude=0.1, envelope=Rectangular())
+    readout = Readout(acquisition=Acquisition(duration=1000), probe=probe_pulse)
+    real_sequence = PulseSequence(
+        [
+            (channel_id("mw0", "drive"), drive_pulse),
+            (channel_id("mw0", "acquisition"), readout),
+        ]
+    )
+    monkeypatch.setattr(
+        iqcc_controller_module,
+        "_batch",
+        lambda sequences: iter([[PulseSequence([])], [real_sequence]]),
+    )
+    options = ExecutionParameters(nshots=1, relaxation_time=0, acquisition_type=AcquisitionType.INTEGRATION)
+
+    results = controller.play(configs, [real_sequence], options, [])
+
+    assert results
+    assert len(controller.manager.opened_configs) == 1
+
+
 def test_play_with_discrimination_acquisition_through_the_cloud_manager(mw_fem_machine):
     """Same cloud-execution path as ``test_play_executes_through_the_cloud_
     manager_and_fetches_results``, but ``AcquisitionType.DISCRIMINATION`` --

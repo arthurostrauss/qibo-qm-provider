@@ -280,3 +280,16 @@ def test_register_gate_installs_macro_on_qubit_pair(backend, dummy_machine):
 
     assert pair.macros["bar"] is not None
     assert "bar" in backend.natives
+
+
+def test_register_gate_warns_when_overwriting_an_existing_name(backend, dummy_machine):
+    """Overwriting an existing macro name may not reach the compiler under
+    this package's currently declared qiskit-qm-provider floor (see
+    register_gate's docstring) -- silently succeeding here would hide that
+    hazard, so it must warn loudly instead."""
+    from quam.components.macro import PulseMacro
+
+    backend.register_gate("foo", 0, PulseMacro(pulse="x180"))
+
+    with pytest.warns(UserWarning, match="overwriting an existing macro"):
+        backend.register_gate("foo", 0, PulseMacro(pulse="x180"))

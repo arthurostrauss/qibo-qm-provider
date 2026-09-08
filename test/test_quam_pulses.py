@@ -96,3 +96,23 @@ def test_readout_with_non_rectangular_probe_falls_back():
     quam_pulse = quam_readout_pulse_from_qibolab_readout(readout, "readout", max_voltage=0.5)
     assert isinstance(quam_pulse, GaussianPulse)
     assert not isinstance(quam_pulse, SquareReadoutPulse)
+
+
+def test_readout_without_threshold_omits_it():
+    """qibolab's Readout carries no threshold/angle of its own -- omitting
+    the kwargs (the default) must not force a spurious 0.0 override onto
+    whatever SquareReadoutPulse's own default is."""
+    probe = Pulse(duration=1000, amplitude=0.1, envelope=Rectangular())
+    readout = Readout(acquisition=Acquisition(duration=1000), probe=probe)
+    quam_pulse = quam_readout_pulse_from_qibolab_readout(readout, "readout", max_voltage=0.5)
+    assert quam_pulse.threshold is None
+
+
+def test_readout_with_threshold_sets_acquisition_fields():
+    probe = Pulse(duration=1000, amplitude=0.1, envelope=Rectangular())
+    readout = Readout(acquisition=Acquisition(duration=1000), probe=probe)
+    quam_pulse = quam_readout_pulse_from_qibolab_readout(
+        readout, "readout", max_voltage=0.5, threshold=0.42, integration_weights_angle=1.23
+    )
+    assert quam_pulse.threshold == pytest.approx(0.42)
+    assert quam_pulse.integration_weights_angle == pytest.approx(1.23)

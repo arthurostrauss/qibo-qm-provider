@@ -142,6 +142,33 @@ def test_play_executes_through_a_fake_local_manager_and_fetches_results(mw_fem_m
     assert results
 
 
+def test_play_continues_past_an_all_empty_batch_and_keeps_later_results(mw_fem_machine, monkeypatch):
+    """Regression for the empty-unrolled-sequence hazard qibolab's own
+    ``QmController.play()`` has (a bare ``return {}``, verified against the
+    installed qibolab): an all-empty batch must ``continue``, not abort the
+    whole call -- otherwise every later, real batch's results would be
+    silently dropped. ``_batch`` is monkeypatched because qibolab's real
+    batching (grouped by resource bounds) never isolates an empty sequence
+    into its own later batch -- but the hazard is in the loop body, which
+    this exercises directly."""
+    import qibo_qm_provider.qibolab_bridge.quam_controller as quam_controller_module
+
+    controller = _controller(mw_fem_machine)
+    controller.manager = _FakeQuantumMachinesManager()
+    real_sequence = _sequence(mw_fem_machine)
+    monkeypatch.setattr(
+        quam_controller_module,
+        "_batch",
+        lambda sequences: iter([[PulseSequence([])], [real_sequence]]),
+    )
+    options = ExecutionParameters(nshots=1, relaxation_time=0, acquisition_type=AcquisitionType.INTEGRATION)
+
+    results = controller.play({}, [real_sequence], options, [])
+
+    assert results
+    assert len(controller.manager.opened_configs) == 1
+
+
 def test_play_with_amplitude_sweep_compiles_offline(mw_fem_machine):
     """Compile-only check (manager=None) that a real sweep threads through
     the new play() without raising -- numeric correctness is covered by

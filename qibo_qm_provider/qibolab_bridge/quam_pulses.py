@@ -17,6 +17,8 @@ multiply, so a pulse converted one way and back preserves its real voltage.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 from qibolab._core.pulses.envelope import Custom, Gaussian, Rectangular
 from qibolab._core.pulses.pulse import Pulse as QibolabPulse
@@ -275,21 +277,41 @@ def _quam_waveform_pulse_from_qibolab_pulse(pulse: QibolabPulse, name: str, max_
 
 
 def quam_readout_pulse_from_qibolab_readout(
-    readout: QibolabReadout, name: str, max_voltage: float = MAX_VOLTAGE_DIRECT
+    readout: QibolabReadout,
+    name: str,
+    max_voltage: float = MAX_VOLTAGE_DIRECT,
+    *,
+    threshold: Optional[float] = None,
+    integration_weights_angle: Optional[float] = None,
 ) -> QuamPulse:
     """Build a QuAM readout-capable ``Pulse`` from a qibolab ``Readout``.
 
-    Uses ``SquareReadoutPulse`` (carrying ``threshold``pulse-level fields
-    QuAM's acquisition wiring reads) when the probe envelope is
-    ``rectangular`` -- the common case for a QM readout pulse -- so an
-    imported ``measure`` macro is acquisition-complete rather than needing a
-    separate wiring step. Any other probe envelope falls back to the plain
-    sampled ``WaveformPulse`` (via :func:`quam_pulse_from_qibolab_pulse`),
+    Uses ``SquareReadoutPulse`` (carrying ``threshold``/
+    ``integration_weights_angle`` pulse-level fields QuAM's acquisition
+    wiring reads) when the probe envelope is ``rectangular`` -- the common
+    case for a QM readout pulse. Any other probe envelope falls back to the
+    plain sampled ``WaveformPulse`` (via :func:`quam_pulse_from_qibolab_pulse`),
     which carries no ``threshold``/integration-weight fields.
+
+    qibolab's ``Readout`` itself has no ``threshold``/angle of its own (that
+    calibration data lives on the *acquisition channel's* config, e.g.
+    ``QmAcquisitionConfig.threshold``/``.iq_angle`` in ``quam_wiring.py`` --
+    see ``native_import.py``, the only caller that has a ``Platform`` to read
+    those from). Pass them explicitly via ``threshold``/
+    ``integration_weights_angle`` to make the returned pulse acquisition-
+    complete for ``AcquisitionType.DISCRIMINATION``; omitting them (the
+    default) returns a pulse that still needs a separate wiring step before
+    shot discrimination will work (see ``ShotsAcquisition`` in
+    ``qua_acquisition.py``, which raises if ``threshold`` is unset).
     """
     probe = readout.probe
     if probe.envelope.kind == "rectangular":
         real_voltage = probe.amplitude * max_voltage
         _check_amplitude_in_range(probe.amplitude, f"qibolab readout pulse {name!r}", max_voltage, real_voltage)
-        return SquareReadoutPulse(length=int(probe.duration), amplitude=real_voltage, id=name)
+        kwargs = {}
+        if threshold is not None:
+            kwargs["threshold"] = threshold
+        if integration_weights_angle is not None:
+            kwargs["integration_weights_angle"] = integration_weights_angle
+        return SquareReadoutPulse(length=int(probe.duration), amplitude=real_voltage, id=name, **kwargs)
     return quam_pulse_from_qibolab_pulse(probe, name, max_voltage)

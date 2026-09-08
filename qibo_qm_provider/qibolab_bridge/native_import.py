@@ -44,7 +44,13 @@ _CHANNEL_SUFFIX_TO_ATTR = {"drive": "xy", "probe": "resonator", "acquisition": "
 _PAIR_CHANNEL_SUFFIX_TO_ATTR = {"flux": "coupler"}
 
 
-def _install_native_as_macro(native, macro_name: str, target_component, name_prefix: str) -> Optional[QuamMacro]:
+def _install_native_as_macro(
+    native,
+    macro_name: str,
+    target_component,
+    name_prefix: str,
+    acquisition_configs: Optional[Dict[str, object]] = None,
+) -> Optional[QuamMacro]:
     """Register each importable pulse in a qibolab ``Native`` on its QuAM
     channel, and install a ``PulseMacro`` on
     ``target_component.macros[macro_name]`` for the (single) channel that
@@ -58,6 +64,14 @@ def _install_native_as_macro(native, macro_name: str, target_component, name_pre
     QuAM attribute on ``target_component`` (e.g. a qubit-pair's coupler when
     absent) are likewise skipped. Returns ``None`` (installs nothing) if no
     importable leg was found.
+
+    ``acquisition_configs`` (``Platform.parameters.configs``, keyed by
+    qibolab ``ChannelId``) supplies ``threshold``/``iq_angle`` for a
+    ``Readout`` leg's acquisition channel -- the qibolab ``Readout`` object
+    itself carries neither (see ``quam_pulses.
+    quam_readout_pulse_from_qibolab_readout``) -- so the imported ``measure``
+    macro is acquisition-complete for ``AcquisitionType.DISCRIMINATION``
+    whenever the source platform itself has that calibration.
     """
     from quam.components.macro import PulseMacro
 
@@ -84,8 +98,14 @@ def _install_native_as_macro(native, macro_name: str, target_component, name_pre
         max_voltage = max_voltage_for_channel(channel)
 
         if isinstance(instruction, QibolabReadout):
+            acq_channel_id = f"{channel_id.rsplit('/', 1)[0]}/acquisition"
+            acq_config = (acquisition_configs or {}).get(acq_channel_id)
             channel.operations[pulse_name] = quam_readout_pulse_from_qibolab_readout(
-                instruction, pulse_name, max_voltage
+                instruction,
+                pulse_name,
+                max_voltage,
+                threshold=getattr(acq_config, "threshold", None),
+                integration_weights_angle=getattr(acq_config, "iq_angle", None),
             )
         else:
             channel.operations[pulse_name] = quam_pulse_from_qibolab_pulse(instruction, pulse_name, max_voltage)
@@ -110,6 +130,12 @@ def import_qibolab_natives_as_macros(
     so a caller can call ``backend.qiskit_backend.update_target()``
     afterward, the same integration seam as ``add_basic_macros``.
 
+    An imported ``MZ`` macro's readout pulse gets its ``threshold``/
+    ``iq_angle`` from ``platform.parameters.configs``'s acquisition-channel
+    config (see :func:`_install_native_as_macro`) -- so it is
+    acquisition-complete for ``AcquisitionType.DISCRIMINATION`` only if
+    ``platform`` itself was calibrated for shot discrimination.
+
     Args:
         platform: A qibolab ``Platform`` with calibrated ``natives``.
         machine: The QuAM root to install macros on.
@@ -122,6 +148,7 @@ def import_qibolab_natives_as_macros(
     """
     installed: Dict[str, QuamMacro] = {}
     qubit_ids = list(qubits) if qubits is not None else list(platform.qubits)
+    acquisition_configs = platform.parameters.configs
 
     for qubit_id in qubit_ids:
         quam_qubit_name = str(qubit_id)
@@ -135,7 +162,9 @@ def import_qibolab_natives_as_macros(
             native = getattr(single_natives, native_field)
             if native is None:
                 continue
-            macro = _install_native_as_macro(native, macro_name, quam_qubit, f"qibolab_{quam_qubit_name}")
+            macro = _install_native_as_macro(
+                native, macro_name, quam_qubit, f"qibolab_{quam_qubit_name}", acquisition_configs
+            )
             if macro is not None:
                 installed[f"{quam_qubit_name}:{macro_name}"] = macro
 
@@ -151,7 +180,9 @@ def import_qibolab_natives_as_macros(
             native = getattr(two_natives, native_field)
             if native is None:
                 continue
-            macro = _install_native_as_macro(native, macro_name, quam_pair, f"qibolab_{quam_pair_name}")
+            macro = _install_native_as_macro(
+                native, macro_name, quam_pair, f"qibolab_{quam_pair_name}", acquisition_configs
+            )
             if macro is not None:
                 installed[f"{quam_pair_name}:{macro_name}"] = macro
 

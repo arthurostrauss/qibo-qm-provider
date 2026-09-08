@@ -50,7 +50,7 @@ session, before this class existed in its current form.)
 from __future__ import annotations
 
 import warnings
-from typing import Dict, List
+from typing import Any, Dict, List, Tuple
 
 from qm import generate_qua_script, qua
 from qm.qua import declare, for_
@@ -83,6 +83,59 @@ class QuamQmController(QmController):
 
     machine: QuamRoot
 
+    def _build_batch_program(
+        self,
+        sequence: PulseSequence,
+        options: ExecutionParameters,
+        sweepers: List[ParallelSweepers],
+    ) -> Tuple[Any, Dict[str, object], Any]:
+        """Build one batch's QUA program (``self.machine.initialize_qpu()``,
+        once, then the shot loop wrapping one :func:`~.qua_sweep.
+        build_sweep_macro`-built macro call) and its matching
+        ``qua_config(self.machine)`` -- shared by every subclass's
+        ``play()`` (:class:`IQCCQmController` included) so the program-
+        building steps cannot drift from each other across the local/cloud
+        execute tails that follow.
+
+        Returns the built ``(qua_program, run)`` macro pair plus ``config``
+        as a 3-tuple: ``(qua_program, config, run)``. ``run.acquisitions``
+        is needed by every caller's ``fetch_results()`` afterward.
+        """
+        with qua.program() as qua_program:
+            self.machine.initialize_qpu()
+            n = declare(int)
+            run = build_sweep_macro(
+                self.machine,
+                sequence,
+                sweepers,
+                register_missing=True,
+                average=options.averaging_mode is AveragingMode.CYCLIC,
+                relaxation_time=options.relaxation_time,
+                acquisition_type=options.acquisition_type,
+            )
+            with for_(n, 0, n < options.nshots, n + 1):
+                run()
+            # INTEGRATION's results_shape reserves a leading "2" (I/Q) axis
+            # that is never a real buffer axis (I and Q are two separate
+            # streams, not a buffer dim); DISCRIMINATION's does not have
+            # one at all -- direct port of qibolab's own
+            # `options.results_shape(sweepers)[::-1][int(has_iq):]`
+            # (instructions.py's `program()`).
+            has_iq = options.acquisition_type is AcquisitionType.INTEGRATION
+            buffer_dims = options.results_shape(sweepers)[::-1][int(has_iq):]
+            with qua.stream_processing():
+                for acquisition in run.acquisitions.values():
+                    acquisition.download(*buffer_dims)
+
+        config = qua_config(self.machine)
+
+        if self.script_file_name is not None:
+            script = generate_qua_script(qua_program, config)
+            with open(self.script_file_name, "w") as file:
+                file.write(script)
+
+        return qua_program, config, run
+
     def play(
         self,
         configs: Dict[str, Config],
@@ -96,10 +149,15 @@ class QuamQmController(QmController):
         qibolab ``PulseSequence`` objects only, agnostic to how the
         resulting sequence gets turned into QUA).
 
-        Per batch: one QUA program is built (``self.machine.
-        initialize_qpu()``, once, then the shot loop wrapping one
-        :func:`~.qua_sweep.build_sweep_macro`-built macro call), compiled
-        against ``qua_config(self.machine)``, and executed.
+        Per batch: one QUA program is built by :meth:`_build_batch_program`,
+        compiled against its returned ``config``, and executed.
+
+        Disconnected mode (``self.manager is None``) is single-batch-only:
+        ``self.manager`` cannot change mid-call, so if it is ``None`` it is
+        ``None`` for every batch, meaning the very first non-empty batch
+        already returns ``{"program", "config"}`` before ``results`` could
+        hold anything from a prior batch -- the ``assert`` below documents
+        that invariant rather than guarding a reachable branch.
 
         Raises:
             NotImplementedError: If ``options.acquisition_type`` is
@@ -124,42 +182,15 @@ class QuamQmController(QmController):
                 sequence, _ = _unroll_sequences(batched_sequences, options.relaxation_time)
 
             if len(sequence) == 0:
-                return {}
+                continue
 
-            with qua.program() as qua_program:
-                self.machine.initialize_qpu()
-                n = declare(int)
-                run = build_sweep_macro(
-                    self.machine,
-                    sequence,
-                    sweepers,
-                    register_missing=True,
-                    average=options.averaging_mode is AveragingMode.CYCLIC,
-                    relaxation_time=options.relaxation_time,
-                    acquisition_type=options.acquisition_type,
-                )
-                with for_(n, 0, n < options.nshots, n + 1):
-                    run()
-                # INTEGRATION's results_shape reserves a leading "2" (I/Q) axis
-                # that is never a real buffer axis (I and Q are two separate
-                # streams, not a buffer dim); DISCRIMINATION's does not have
-                # one at all -- direct port of qibolab's own
-                # `options.results_shape(sweepers)[::-1][int(has_iq):]`
-                # (instructions.py's `program()`).
-                has_iq = options.acquisition_type is AcquisitionType.INTEGRATION
-                buffer_dims = options.results_shape(sweepers)[::-1][int(has_iq):]
-                with qua.stream_processing():
-                    for acquisition in run.acquisitions.values():
-                        acquisition.download(*buffer_dims)
-
-            config = qua_config(self.machine)
-
-            if self.script_file_name is not None:
-                script = generate_qua_script(qua_program, config)
-                with open(self.script_file_name, "w") as file:
-                    file.write(script)
+            qua_program, config, run = self._build_batch_program(sequence, options, sweepers)
 
             if self.manager is None:
+                assert not results, (
+                    "self.manager cannot become None mid-call -- a disconnected "
+                    "multi-batch play() must have returned on its first non-empty batch."
+                )
                 warnings.warn(
                     "Not connected to Quantum Machines. Returning program and config.",
                     stacklevel=2,

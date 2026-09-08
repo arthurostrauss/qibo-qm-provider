@@ -49,18 +49,14 @@ from typing import TYPE_CHECKING, Any, Dict, List
 
 from pydantic import Field
 from qibolab._core.components import Config
-from qibolab._core.execution_parameters import AcquisitionType, AveragingMode, ExecutionParameters
+from qibolab._core.execution_parameters import AcquisitionType, ExecutionParameters
 from qibolab._core.identifier import Result
 from qibolab._core.instruments.qm.controller import _batch, _unroll_sequences
 from qibolab._core.pulses.pulse import PulseId
 from qibolab._core.sequence import PulseSequence
 from qibolab._core.sweeper import ParallelSweepers
-from qm import generate_qua_script, qua
-from qm.qua import declare, for_
 
-from .qm_config_source import qua_config
 from .qua_acquisition import fetch_results
-from .qua_sweep import build_sweep_macro
 from .quam_controller import QuamQmController
 
 if TYPE_CHECKING:
@@ -148,19 +144,18 @@ class IQCCQmController(QuamQmController):
         options: ExecutionParameters,
         sweepers: List[ParallelSweepers],
     ) -> Dict[PulseId, Result] | Dict[str, object]:
-        """Same program-building as ``QuamQmController.play()``, executed
-        through ``CloudQuantumMachine.execute()`` instead of the local
-        SDK's compile-then-queue-then-wait sequence.
+        """Same program-building as ``QuamQmController.play()`` (shared via
+        :meth:`~.quam_controller.QuamQmController._build_batch_program`),
+        executed through ``CloudQuantumMachine.execute()`` instead of the
+        local SDK's compile-then-queue-then-wait sequence.
 
-        This is a near-complete copy of ``QuamQmController.play()``'s body,
-        not a call to ``super().play()`` with ``self.manager`` swapped in:
+        Not a call to ``super().play()`` with ``self.manager`` swapped in:
         a ``CloudQuantumMachine`` has no ``.compile()``/``.queue`` at all,
         so the compile/queue/wait tail has to be replaced outright rather
-        than intercepted. Every call this method makes to build the QUA
-        program (``initialize_qpu()``, ``build_sweep_macro``, the shot
-        loop, stream-processing download) is identical to the base class --
-        only the final "open, then execute" step differs from local
-        execution.
+        than intercepted. Only the batching/empty-batch handling and the
+        final "open, then execute" step are duplicated from the base
+        class -- both routed through the same shared helper so they cannot
+        drift from it independently.
         """
         if options.acquisition_type is AcquisitionType.RAW:
             raise NotImplementedError(
@@ -172,43 +167,20 @@ class IQCCQmController(QuamQmController):
         for batched_sequences in _batch(sequences):
             if len(batched_sequences) == 0:
                 continue
-            if len(batched_sequences) == 1:
+            elif len(batched_sequences) == 1:
                 sequence = batched_sequences[0]
             else:
                 sequence, _ = _unroll_sequences(batched_sequences, options.relaxation_time)
             if len(sequence) == 0:
-                return {}
+                continue
 
-            with qua.program() as qua_program:
-                self.machine.initialize_qpu()
-                n = declare(int)
-                run = build_sweep_macro(
-                    self.machine,
-                    sequence,
-                    sweepers,
-                    register_missing=True,
-                    average=options.averaging_mode is AveragingMode.CYCLIC,
-                    relaxation_time=options.relaxation_time,
-                    acquisition_type=options.acquisition_type,
-                )
-                with for_(n, 0, n < options.nshots, n + 1):
-                    run()
-                # See QuamQmController.play()'s identical computation: direct
-                # port of qibolab's own `[::-1][int(has_iq):]` slice.
-                has_iq = options.acquisition_type is AcquisitionType.INTEGRATION
-                buffer_dims = options.results_shape(sweepers)[::-1][int(has_iq):]
-                with qua.stream_processing():
-                    for acquisition in run.acquisitions.values():
-                        acquisition.download(*buffer_dims)
-
-            config = qua_config(self.machine)
-
-            if self.script_file_name is not None:
-                script = generate_qua_script(qua_program, config)
-                with open(self.script_file_name, "w") as file:
-                    file.write(script)
+            qua_program, config, run = self._build_batch_program(sequence, options, sweepers)
 
             if self.manager is None:
+                assert not results, (
+                    "self.manager cannot become None mid-call -- a disconnected "
+                    "multi-batch play() must have returned on its first non-empty batch."
+                )
                 warnings.warn(
                     "Not connected to Quantum Machines. Returning program and config.",
                     stacklevel=2,
