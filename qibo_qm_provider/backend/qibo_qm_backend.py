@@ -28,6 +28,7 @@ from qiskit_qm_provider.parameter_table import InputType, Parameter, ParameterTa
 from quam.core import QuamRoot
 
 from .circuit_conversion import qibo_circuit_to_qiskit, validate_two_qubit_connectivity
+from .gate_map import OPERATION_NAME_TO_NATIVE_GATE
 from .measurement_translation import translate_measurements
 from .parameter_table import QiboParameterTable
 from .symbolic_parameters import circuit_has_symbols, validate_symbol_name
@@ -101,7 +102,35 @@ class QiboQMBackend(NumpyBackend):
 
     @property
     def natives(self) -> List[str]:
-        return list(self._qiskit_backend.target.operation_names)
+        """The Qibo-native gate names this machine can execute.
+
+        Filters the wrapped ``QMBackend``'s raw ``target.operation_names``
+        -- Qiskit operation-name strings, which also include Qiskit-only
+        control-flow ops (``if_else``, ``for_loop``, ...) and a bespoke
+        ``Instruction`` for any QuAM macro whose name isn't a recognized
+        Qiskit gate -- down to Qibo's own gate names, via
+        ``gate_map.OPERATION_NAME_TO_NATIVE_GATE``.
+
+        This isn't just narrowing for tidiness: Qibo's own default
+        transpiler construction looks native gates up as
+        ``NativeGates[backend.natives]`` (``qibo.backends.__init__``'s
+        ``_default_transpiler``), and ``NativeGates`` is a closed
+        ``enum.Flag`` matched by exact, case-sensitive member name -- the raw
+        lowercase operation strings this property used to return (e.g.
+        ``"cz"``) never matched a member (``"CZ"``) and silently resolved to
+        ``NativeGates.NONE``. Access ``self.qiskit_backend.target.
+        operation_names`` directly for the unfiltered, machine-level view
+        (e.g. to see custom macro names like ones installed via
+        ``register_gate``).
+        """
+        operation_names = self._qiskit_backend.target.operation_names
+        return sorted(
+            {
+                OPERATION_NAME_TO_NATIVE_GATE[op]
+                for op in operation_names
+                if op in OPERATION_NAME_TO_NATIVE_GATE
+            }
+        )
 
     def update_target(self, input_type: Optional[InputType] = None) -> None:
         """Resynchronize the qm-qasm operation registry with whatever macros

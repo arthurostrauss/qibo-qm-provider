@@ -43,6 +43,7 @@ renamed gate left to alias.
 from __future__ import annotations
 
 import qiskit.circuit.library as qlib
+from qibo.transpiler.unroller import NativeGates
 
 from .qibo_qiskit_gates import (
     FSimGate,
@@ -65,6 +66,7 @@ __all__ = [
     "QIBO_TO_OPERATION_NAME",
     "EMITTED_OPERATION_NAMES",
     "DEFERRED_GATES",
+    "OPERATION_NAME_TO_NATIVE_GATE",
 ]
 
 #: ``{qibo gate class name: builder(*translated_params) -> Qiskit gate}``.
@@ -178,6 +180,32 @@ QIBO_TO_OPERATION_NAME = {
 #: :func:`~qibo_qm_provider.backend.symbolic_parameters.validate_symbol_name`),
 #: so the converter passes this set in as ``forbidden_names``.
 EMITTED_OPERATION_NAMES = frozenset(QIBO_TO_OPERATION_NAME.values()) | {"measure"}
+
+#: Operation name -> Qibo native-gate name, restricted to
+#: ``qibo.transpiler.unroller.NativeGates``'s own nine members (``I``, ``Z``,
+#: ``RZ``, ``M``, ``GPI2``, ``U3``, ``CZ``, ``iSWAP``, ``CNOT``). Built by
+#: inverting :data:`QIBO_TO_OPERATION_NAME` and keeping only entries whose
+#: Qibo name is one of those nine -- so e.g. ``"cx"`` (the operation Qiskit
+#: emits for Qibo's ``CNOT``) maps back to ``"CNOT"``, while ``"x"``, ``"gpi"``,
+#: or a QuAM macro name with no Qibo-gate meaning at all are simply absent.
+#:
+#: This exists because ``NativeGates`` is what Qibo's own default transpiler
+#: construction looks operation names up against
+#: (``NativeGates[backend.natives]``, see ``qibo.backends.__init__``'s
+#: ``_default_transpiler``) -- and lookup is by exact, case-sensitive member
+#: name. A lowercase Qiskit operation string like ``"cz"`` never matches the
+#: member ``NativeGates.CZ``, so anything not translated through this table
+#: would silently resolve to ``NativeGates.NONE`` instead of raising.
+#:
+#: ``"measure"`` is added explicitly since ``M`` (Qibo's measurement gate) has
+#: no entry in :data:`QIBO_TO_OPERATION_NAME` -- measurement is handled
+#: separately throughout this package, not through the gate table.
+OPERATION_NAME_TO_NATIVE_GATE = {
+    op_name: qibo_name
+    for qibo_name, op_name in QIBO_TO_OPERATION_NAME.items()
+    if qibo_name in NativeGates.__members__
+}
+OPERATION_NAME_TO_NATIVE_GATE["measure"] = "M"
 
 #: Qibo gates deliberately *not* mapped, with the reason. Used to produce an
 #: actionable error rather than a bare KeyError.

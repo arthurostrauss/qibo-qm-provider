@@ -41,8 +41,16 @@ def test_natives_reflect_wrapped_target_after_add_basic_macros(add_basic_macros_
     backend = QiboQMBackend(add_basic_macros_installed)
     backend.qiskit_backend.update_target()
 
-    assert set(backend.natives) == set(backend.qiskit_backend.target.operation_names)
-    assert len(backend.natives) > 0
+    # add_basic_macros installs id/x/sx/sy/sydg/rz/measure/reset/delay on every
+    # qubit and cz on the pair -- natives is filtered/mapped down to Qibo's own
+    # NativeGates vocabulary, so only id/rz/measure/cz (-> I/RZ/M/CZ) survive;
+    # x/sx/sy/sydg/reset/delay have no NativeGates entry and are correctly
+    # absent, unlike the raw (unfiltered) target.operation_names.
+    assert set(backend.natives) == {"I", "RZ", "M", "CZ"}
+    # The raw, unfiltered view still carries the rest (x/sx/sy/... plus
+    # control-flow op names), confirming natives is a real filter, not a
+    # renaming of the whole set.
+    assert len(backend.qiskit_backend.target.operation_names) > len(backend.natives)
 
 
 def test_cz_macro_installs_cleanly(add_basic_macros_installed):
@@ -58,7 +66,7 @@ def test_cz_macro_installs_cleanly(add_basic_macros_installed):
     assert isinstance(cz_macro, CZGate)
 
     backend = QiboQMBackend(add_basic_macros_installed)
-    assert "cz" in backend.natives
+    assert "CZ" in backend.natives
 
 
 def test_apply_gate_raises_not_implemented(backend):
@@ -249,27 +257,30 @@ def test_circuit_to_qua_wire_names_routes_logical_qubits_to_the_calibrated_direc
 
 def test_update_target_delegates_to_wrapped_backend(backend, dummy_machine):
     # Manually install a macro (bypassing register_gate) then confirm the
-    # thin update_target() delegate actually resyncs the registry.
+    # thin update_target() delegate actually resyncs the registry. "foo" has
+    # no Qibo-gate meaning, so this is checked against the wrapped backend's
+    # raw operation-name view, not the Qibo-native-filtered `natives`.
     from quam.components.macro import PulseMacro
 
     q0 = dummy_machine.qubits["q0"]
-    assert "foo" not in backend.natives
+    assert "foo" not in backend.qiskit_backend.target.operation_names
     q0.macros["foo"] = PulseMacro(pulse="x180")
 
     backend.update_target()
 
-    assert "foo" in backend.natives
+    assert "foo" in backend.qiskit_backend.target.operation_names
 
 
 def test_register_gate_installs_macro_on_single_qubit_and_resyncs(backend, dummy_machine):
     from quam.components.macro import PulseMacro
 
-    assert "foo" not in backend.natives
+    assert "foo" not in backend.qiskit_backend.target.operation_names
 
     backend.register_gate("foo", 0, PulseMacro(pulse="x180"))
 
     assert dummy_machine.qubits["q0"].macros["foo"] is not None
-    assert "foo" in backend.natives  # resynced automatically, no manual update_target() needed
+    # resynced automatically, no manual update_target() needed
+    assert "foo" in backend.qiskit_backend.target.operation_names
 
 
 def test_register_gate_installs_macro_on_qubit_pair(backend, dummy_machine):
@@ -279,7 +290,7 @@ def test_register_gate_installs_macro_on_qubit_pair(backend, dummy_machine):
     backend.register_gate("bar", (0, 1), PulseMacro(pulse="#/qubits/q0/z/operations/const"))
 
     assert pair.macros["bar"] is not None
-    assert "bar" in backend.natives
+    assert "bar" in backend.qiskit_backend.target.operation_names
 
 
 def test_register_gate_warns_when_overwriting_an_existing_name(backend, dummy_machine):

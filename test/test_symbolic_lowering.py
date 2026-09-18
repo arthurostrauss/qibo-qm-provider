@@ -765,7 +765,7 @@ def test_register_gate_cannot_override_an_existing_operation(add_basic_macros_in
     backend = QiboQMBackend(add_basic_macros_installed)
     recording_class, received = _recording_macro_class(1)
     backend.register_gate("rz", "q0", recording_class())
-    assert "rz" in backend.natives
+    assert "RZ" in backend.natives
 
     circuit = Circuit(1)
     circuit.add(gates.RZ(0, theta=sp.Symbol("theta")))
