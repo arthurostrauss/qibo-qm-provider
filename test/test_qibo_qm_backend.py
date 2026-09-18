@@ -4,6 +4,8 @@ No live QOP hardware: qmm/_qm are left None throughout (QMBackend's own
 lazy-connection properties are never touched by these tests).
 """
 
+from unittest.mock import patch
+
 import pytest
 import sympy as sp
 
@@ -14,6 +16,23 @@ from qibo_qm_provider.exceptions import UnsupportedConnectivityError, Unsupporte
 @pytest.fixture
 def backend(dummy_machine):
     return QiboQMBackend(dummy_machine)
+
+
+def _install_gpi2_macro(backend, machine, qubit="q0"):
+    """Give ``machine``/``backend`` a native single-qubit-universal family
+    (GPI2), so a plain H has something to be decomposed into -- neither
+    add_basic_macros_installed nor dummy_machine installs one by default
+    (see test_natives_reflect_wrapped_target_after_add_basic_macros)."""
+    from quam.components.macro import QubitMacro
+    from quam.core import quam_dataclass
+
+    @quam_dataclass
+    class _NoOpGPI2(QubitMacro):
+        def apply(self, phi, **kwargs):
+            pass
+
+    machine.qubits[qubit].macros["gpi2"] = _NoOpGPI2()
+    backend.update_target()
 
 
 def test_construction_wraps_qiskit_backend(backend, dummy_machine):
@@ -253,6 +272,101 @@ def test_circuit_to_qua_wire_names_routes_logical_qubits_to_the_calibrated_direc
     right_direction = Circuit(2, wire_names=["q1", "q0"])
     right_direction.add(gates.CZ(1, 0))
     backend.circuit_to_qua(right_direction)  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# execute_circuit's default transpile step (issue #4)
+#
+# Bug #3's root cause: a plain H reaching the OpenQASM3 exporter with no
+# registered macro. `run()` is patched out below (it needs a live QM
+# connection) purely to capture the QuantumCircuit execute_circuit hands it,
+# proving the decomposition happened before compiling.
+# --------------------------------------------------------------------------- #
+
+
+def test_execute_circuit_transpiles_a_non_native_gate_by_default(add_basic_macros_installed):
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    _install_gpi2_macro(backend, add_basic_macros_installed)
+    assert "H" not in backend.natives
+
+    circuit = Circuit(1)
+    circuit.add(gates.H(0))
+    circuit.add(gates.M(0))
+
+    with (
+        patch.object(backend.qiskit_backend, "run") as mock_run,
+        patch("qibo_qm_provider.backend.qibo_qm_backend.translate_measurements"),
+    ):
+        with pytest.warns(UserWarning, match="H"):
+            backend.execute_circuit(circuit)
+
+    (qc,), _ = mock_run.call_args
+    assert "h" not in [instr.operation.name for instr in qc.data]
+
+
+def test_execute_circuit_transpile_false_leaves_a_non_native_gate_untouched(add_basic_macros_installed):
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    _install_gpi2_macro(backend, add_basic_macros_installed)
+
+    circuit = Circuit(1)
+    circuit.add(gates.H(0))
+    circuit.add(gates.M(0))
+
+    with (
+        patch.object(backend.qiskit_backend, "run") as mock_run,
+        patch("qibo_qm_provider.backend.qibo_qm_backend.translate_measurements"),
+    ):
+        backend.execute_circuit(circuit, transpile=False)
+
+    (qc,), _ = mock_run.call_args
+    assert [instr.operation.name for instr in qc.data] == ["h", "measure"]
+
+
+def test_execute_circuit_already_native_gate_is_unaffected_by_transpile(add_basic_macros_installed):
+    import warnings
+
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    assert "CZ" in backend.natives
+
+    circuit = Circuit(2)
+    circuit.add(gates.CZ(0, 1))
+    circuit.add(gates.M(0, 1))
+
+    with (
+        patch.object(backend.qiskit_backend, "run") as mock_run,
+        patch("qibo_qm_provider.backend.qibo_qm_backend.translate_measurements"),
+    ):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            backend.execute_circuit(circuit)
+
+    assert not caught
+    (qc,), _ = mock_run.call_args
+    assert [instr.operation.name for instr in qc.data] == ["cz", "measure", "measure"]
+
+
+def test_execute_circuit_non_native_non_decomposable_gate_raises_actionable_error(add_basic_macros_installed):
+    """No GPI2/U3 installed on this fixture by default -- H genuinely cannot
+    be decomposed, and that must surface as UnsupportedGateError, not a bare
+    upstream DecompositionError."""
+    from qibo import Circuit, gates
+    from qibo_qm_provider.exceptions import UnsupportedGateError
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    assert "GPI2" not in backend.natives and "U3" not in backend.natives
+
+    circuit = Circuit(1)
+    circuit.add(gates.H(0))
+    circuit.add(gates.M(0))
+
+    with pytest.raises(UnsupportedGateError, match="H"):
+        backend.execute_circuit(circuit)
 
 
 def test_update_target_delegates_to_wrapped_backend(backend, dummy_machine):

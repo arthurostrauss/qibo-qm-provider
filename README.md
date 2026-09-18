@@ -73,7 +73,8 @@ Qibo's per-gate measurement convention:
 
 | Module | What it does |
 |---|---|
-| [`backend/circuit_conversion.py`](qibo_qm_provider/backend/circuit_conversion.py) | Qibo `Circuit` → Qiskit `QuantumCircuit`, via `Circuit.to_qasm()` → `qiskit.qasm2.loads` for concrete circuits, or a direct gate-by-gate build for circuits with symbolic (`sympy`) parameters; resolves `circuit.wire_names`; validates two-qubit connectivity direction |
+| [`backend/circuit_conversion.py`](qibo_qm_provider/backend/circuit_conversion.py) | Qibo `Circuit` → Qiskit `QuantumCircuit`, gate by gate (concrete or with symbolic `sympy` parameters alike); resolves `circuit.wire_names`; validates two-qubit connectivity direction |
+| [`backend/default_transpile.py`](qibo_qm_provider/backend/default_transpile.py) | `execute_circuit`'s default, opt-out-able (`transpile=False`) step: decomposes any gate not already native to the target into its native gate set (e.g. a plain `H` with no `h` macro installed) |
 | [`backend/gate_map.py`](qibo_qm_provider/backend/gate_map.py), [`backend/qibo_qiskit_gates.py`](qibo_qm_provider/backend/qibo_qiskit_gates.py) | The verified Qibo↔Qiskit gate correspondence, plus thin gate subclasses that keep Qibo's own gate name (`prx`, `u1q`, ...) instead of the name Qiskit's standard gate would otherwise emit |
 | [`backend/symbolic_parameters.py`](qibo_qm_provider/backend/symbolic_parameters.py) | `sympy` expression → Qiskit `Parameter`, and parameter-name collision checks against the machine's installed operation names |
 | [`backend/parameter_table.py`](qibo_qm_provider/backend/parameter_table.py) (`QiboParameterTable`) | A Qibo-circuit source adapter for `qiskit_qm_provider.parameter_table.ParameterTable` — Qibo's counterpart of that class's existing `from_qiskit` |
@@ -86,9 +87,12 @@ subclass, same relationship to its wrapped `QMBackend` subclass.
 ### `QiboQMPlatformBackend`: the `qibolab`-native path
 
 `QiboQMPlatformBackend` subclasses `qibolab._core.backends.QibolabBackend`
-directly. `execute_circuit`/`execute_circuits` are **inherited unchanged**
-— qibolab's own `Compiler.compile` (native-gate rules → `PulseSequence`) and
-`platform.execute(...)`, with no OpenQASM detour at all:
+directly. `execute_circuit` adds one step on top of the inherited
+implementation — the same default gate-decomposition `QiboQMBackend` gets,
+see `backend/default_transpile.py` above (opt out with `transpile=False`) —
+then delegates to qibolab's own `Compiler.compile` (native-gate rules →
+`PulseSequence`) and `platform.execute(...)`, with no OpenQASM detour at
+all. `execute_circuits` is inherited unchanged, with no equivalent step:
 
 ```python
 from qibo import Circuit, gates
