@@ -1,0 +1,68 @@
+[project]
+name = "qibo-qm-provider"
+version = "0.1.0"
+description = "An interface for compiling and executing Qibo workflows on Quantum Machines' Quantum Orchestration Platform."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+authors = [
+    { name = "Arthur Strauss", email = "arthur.strauss@u.nus.edu" },
+]
+license = { text = "Apache License 2.0" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+dependencies = [
+    "qibo",
+    "qibolab",
+    "qibocal",
+    "qiskit",
+    # See QiboQMBackend.register_gate's docstring: 0.3.4 (the latest PyPI
+    # release as of this writing) predates the operation_key identity-cache
+    # fix for re-registering an existing operation name -- bump this floor
+    # once a release carrying that fix ships.
+    "qiskit-qm-provider>=0.3.4",
+    "qualang-tools>=0.16.0",
+    "quam>=0.4.1",
+    # Alpha-only: a direct git dependency (no PyPI release yet) is fragile
+    # for CI/consumers pinning by version -- switch to a PyPI constraint
+    # once quam-builder publishes one.
+    "quam-builder@git+https://github.com/qua-platform/quam-builder.git@v0.4.0",
+    "qm-qua>=1.2.3",
+    "qm-qasm>=1.7.7",
+    "openqasm3",
+    "qiskit_qasm3_import",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+# qibolab_bridge.iqcc_controller/platform_from_quam lazy-import this rather
+# than declaring it directly. Without it, _resolve_controller_class() falls
+# back to a local QuamQmController for what was meant to be an IQCC machine
+# (see its docstring) -- a confusing failure far from the real, missing-
+# package cause. Declaring it as an extra makes the requirement discoverable
+# up front instead.
+iqcc = ["iqcc-cloud-client"]
+
+[tool.pytest.ini_options]
+markers = [
+    "iqcc: requires real IQCC cloud credentials/access (excluded by default; run with -m iqcc)",
+]
+addopts = "-m 'not iqcc'"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["qibo_qm_provider"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
