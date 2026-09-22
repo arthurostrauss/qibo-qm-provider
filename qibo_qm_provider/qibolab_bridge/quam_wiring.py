@@ -354,18 +354,6 @@ def _wire_flux(ch_id: str, flux_line, channels: dict, configs: dict, fems: dict,
         filters.append(FiniteImpulseResponseFilter(coefficients=list(feedforward_taps)))
     filters += [ExponentialFilter(amplitude=a, tau=t) for a, t in exponential_terms]
 
-    if feedforward_taps and exponential_terms:
-        warnings.warn(
-            f"{owner_label}: QuAM has both feedforward_filter taps and exponential_filter "
-            "terms -- qibolab's OpxOutputConfig.filter() convolves every filter's "
-            "`.feedforward` together for the 'feedforward' config key (including "
-            "ExponentialFilter's own FIR approximation), while also emitting those same "
-            "exponential terms natively under the 'exponential' key for the OPX1000 cluster "
-            "type. This may double-apply the exponential correction on real hardware -- "
-            "verify against machine.generate_config() before trusting flux pulse shape here.",
-            stacklevel=2,
-        )
-
     configs[ch_id] = OpxOutputConfig(
         offset=_flux_offset(flux_line),
         output_mode=getattr(port, "output_mode", "direct"),
