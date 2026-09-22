@@ -19,9 +19,10 @@ crash on exactly the ion-trap-style circuits this package exists to
 support, or -- for a gate that already *is* one of the nine members, e.g. a
 circuit already written in ``GPI2``/``CZ`` -- silently rebuild it through
 Qibo's generic decomposition instead of leaving it alone. So a gate already
-in ``already_native`` (the target's actual, per-machine operation set, wider
-than the ``NativeGates`` enum) is always left untouched, and only a
-genuinely non-native gate is handed to ``translate_gate``.
+in ``already_native`` (for both QiboQM backends: the shared Enum∩QuAM-macro
+set from :func:`~qibo_qm_provider.backend.gate_map.enum_compatible_quam_natives`)
+is always left untouched, and only a genuinely non-native gate is handed to
+``translate_gate``.
 """
 
 from __future__ import annotations

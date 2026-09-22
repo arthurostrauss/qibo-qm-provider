@@ -34,7 +34,6 @@ from typing import Callable, Optional, Union
 
 from qibo.models import Circuit
 from qibo.result import MeasurementOutcomes
-from qibo.transpiler.unroller import NativeGates
 from qibolab import Platform
 from qibolab._core.backends import QibolabBackend
 from qibolab._core.sequence import PulseSequence
@@ -47,6 +46,11 @@ from ..qibolab_bridge.platform_from_quam import (
 )
 from ..qibolab_bridge.qua_macros import ParameterTarget, sequence_to_qua_macro
 from .default_transpile import default_transpile
+from .gate_map import (
+    ENUM_COMPATIBLE_NATIVE_GATES,
+    collect_quam_macro_operation_names,
+    enum_compatible_quam_natives,
+)
 
 __all__ = ["QiboQMPlatformBackend"]
 
@@ -83,6 +87,27 @@ class QiboQMPlatformBackend(QibolabBackend):
         super().__init__(platform)
         self.machine = machine
 
+    @property
+    def natives(self):
+        """The Enum-compatible, QuAM-backed native gate names for this machine.
+
+        Shared definition with ``QiboQMBackend.natives`` (issue #6): when
+        ``self.machine`` is known, QuAM macros on that machine are filtered
+        through
+        :func:`~qibo_qm_provider.backend.gate_map.enum_compatible_quam_natives`
+        into
+        :data:`~qibo_qm_provider.backend.gate_map.ENUM_COMPATIBLE_NATIVE_GATES`.
+        When no machine is attached (bare platform-name construction), the
+        inherited ``QibolabBackend.natives`` list is narrowed to that same
+        Enum-compatible vocabulary (QuAM backing cannot be re-checked without
+        the source machine).
+        """
+        if self.machine is not None:
+            return enum_compatible_quam_natives(
+                collect_quam_macro_operation_names(self.machine)
+            )
+        return sorted(set(super().natives) & ENUM_COMPATIBLE_NATIVE_GATES)
+
     def execute_circuit(
         self,
         circuit: Circuit,
@@ -100,9 +125,10 @@ class QiboQMPlatformBackend(QibolabBackend):
         gates" already. This override adds that check as a default,
         opt-out-able step, via :func:`~qibo_qm_provider.backend.
         default_transpile.default_transpile`, using :attr:`natives`
-        (``QibolabBackend.natives``, inherited unchanged) as both what
-        counts as already-native and what a non-native gate may be
-        decomposed into. ``circuit.wire_names`` is preserved untouched --
+        (the shared Enum∩QuAM-macro set from issue #6, same definition
+        as ``QiboQMBackend.natives``) as both what counts as
+        already-native and what a non-native gate may be decomposed
+        into. ``circuit.wire_names`` is preserved untouched --
         ``self.compiler.compile`` reads it directly for physical qubit
         placement, and this step never re-places qubits, only rewrites
         gates.
@@ -127,9 +153,7 @@ class QiboQMPlatformBackend(QibolabBackend):
             circuit = default_transpile(
                 circuit,
                 already_native=self.natives,
-                decomposition_targets=[
-                    name for name in self.natives if name in NativeGates.__members__ and name != "NONE"
-                ],
+                decomposition_targets=self.natives,
             )
         return super().execute_circuit(circuit, initial_state=initial_state, nshots=nshots)
 

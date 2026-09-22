@@ -1,4 +1,21 @@
-# `QiboQMBackend.natives` doesn't return Qibo native gates
+# `QiboQMBackend.natives` / shared Enum∩QuAM natives
+
+Status: Route A (below) implemented 2026-09-18. Issue #6 (2026-09-22) further
+unified both backends on the **most restrictive** set that is (a) backed by
+QuAM macros and (b) accepted by both ``qibo.transpiler.unroller.NativeGates``
+and qibolab's default ``Compiler`` rule table -- see
+``gate_map.ENUM_COMPATIBLE_NATIVE_GATES`` /
+``gate_map.enum_compatible_quam_natives``. ``U3`` is excluded (qibolab has no
+default compiler rule); ``GPI``/``Align`` are excluded (not in Qibo's
+``NativeGates``). Both backends' ``.natives`` and ``execute_circuit``
+already-native / decomposition-target sets use this shared helper; the PR #5
+special case that widened ``QiboQMBackend``'s already-native set to full
+``target.operation_names`` is dropped.
+
+---
+
+Original investigation note follows.
+
 
 Status: investigation note, 2026-09-18. Route A (below) implemented the same
 day: `gate_map.OPERATION_NAME_TO_NATIVE_GATE` plus the filtered `natives`

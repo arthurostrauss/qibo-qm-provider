@@ -61,10 +61,11 @@ def test_natives_reflect_wrapped_target_after_add_basic_macros(add_basic_macros_
     backend.qiskit_backend.update_target()
 
     # add_basic_macros installs id/x/sx/sy/sydg/rz/measure/reset/delay on every
-    # qubit and cz on the pair -- natives is filtered/mapped down to Qibo's own
-    # NativeGates vocabulary, so only id/rz/measure/cz (-> I/RZ/M/CZ) survive;
-    # x/sx/sy/sydg/reset/delay have no NativeGates entry and are correctly
-    # absent, unlike the raw (unfiltered) target.operation_names.
+    # qubit and cz on the pair -- natives is the shared Enum∩QuAM-macro set
+    # (issue #6), so only id/rz/measure/cz (-> I/RZ/M/CZ) survive; x/sx/sy/
+    # sydg/reset/delay have no Enum-compatible NativeGates∩qibolab-compiler
+    # entry and are correctly absent, unlike the raw (unfiltered)
+    # target.operation_names.
     assert set(backend.natives) == {"I", "RZ", "M", "CZ"}
     # The raw, unfiltered view still carries the rest (x/sx/sy/... plus
     # control-flow op names), confirming natives is a real filter, not a
@@ -418,3 +419,14 @@ def test_register_gate_warns_when_overwriting_an_existing_name(backend, dummy_ma
 
     with pytest.warns(UserWarning, match="overwriting an existing macro"):
         backend.register_gate("foo", 0, PulseMacro(pulse="x180"))
+
+
+def test_natives_match_across_backends_for_same_machine(add_basic_macros_installed):
+    """Issue #6: both backends share the Enum∩QuAM-macro natives definition."""
+    from qibo_qm_provider import QiboQMBackend, QiboQMPlatformBackend
+
+    qm = QiboQMBackend(add_basic_macros_installed)
+    qm.qiskit_backend.update_target()
+    platform = QiboQMPlatformBackend.from_machine(add_basic_macros_installed)
+
+    assert set(qm.natives) == set(platform.natives) == {"I", "RZ", "M", "CZ"}
