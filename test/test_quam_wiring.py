@@ -141,13 +141,14 @@ def test_delay_and_crosstalk_loss_warns(mw_fem_machine):
 
 def test_feedforward_taps_are_transferred(mw_fem_machine):
     """QuAM's raw feedforward_filter taps are now transferred as a
-    FiniteImpulseResponseFilter (previously silently dropped) -- the
-    resulting config's "feedforward" key is the normalized *convolution* of
-    those taps with the exponential filter's own FIR approximation (per
-    OpxOutputConfig.filter()'s cluster-agnostic feedforward property, which
-    combines every registered filter), so it is not bit-identical to the raw
-    taps, but the taps are a genuine, present contribution to it -- unlike
-    before, where they had no representation in the config at all."""
+    FiniteImpulseResponseFilter (previously silently dropped). For the
+    OPX1000 LF/MW clusters this converter targets (see build_qm_wiring's
+    fems["LF"] assignment in _wire_flux), OpxOutputConfig._opx1000_filter
+    excludes ExponentialFilter terms from the FIR "feedforward" convolution
+    -- they get their own native "exponential" IIR stage instead, precisely
+    to avoid double-applying the same correction through both stages -- so
+    the derived "feedforward" here is bit-identical to the raw taps, not a
+    convolution of the two."""
     from qibolab._core.components.filters import FiniteImpulseResponseFilter
 
     _, configs, _ = build_qm_wiring(mw_fem_machine)
@@ -158,7 +159,7 @@ def test_feedforward_taps_are_transferred(mw_fem_machine):
     assert fir_filters[0].coefficients == list(quam_port.feedforward_filter)
 
     derived = configs["mw0/flux"].filter("LF")["feedforward"]
-    assert derived != list(quam_port.feedforward_filter)  # convolved with the exponential terms + normalized
+    assert derived == list(quam_port.feedforward_filter)
 
 
 # ---------------------------------------------------------------------------

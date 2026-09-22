@@ -370,6 +370,145 @@ def test_execute_circuit_non_native_non_decomposable_gate_raises_actionable_erro
         backend.execute_circuit(circuit)
 
 
+def test_execute_circuits_rejects_non_circuit_initial_state(backend):
+    from qibo import Circuit, gates
+
+    circuit = Circuit(1)
+    circuit.add(gates.M(0))
+    with pytest.raises(ValueError):
+        backend.execute_circuits([circuit], initial_state=[0, 1])
+
+
+def test_execute_circuits_rejects_symbolic_circuit(add_basic_macros_installed):
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    circuit = Circuit(1)
+    circuit.add(gates.RZ(0, theta=sp.Symbol("theta")))
+
+    with pytest.raises(ValueError, match="circuit_to_qua"):
+        backend.execute_circuits([circuit])
+
+
+def test_execute_circuits_rejects_reversed_cz_direction(add_basic_macros_installed):
+    """The connectivity check must fire before execute_circuits ever
+    attempts to submit a job (no live QM connection is set up in this
+    fixture)."""
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+
+    circuit = Circuit(2)
+    circuit.add(gates.CZ(1, 0))
+    circuit.add(gates.M(0, 1))
+
+    with pytest.raises(UnsupportedConnectivityError):
+        backend.execute_circuits([circuit])
+
+
+def test_execute_circuits_submits_one_job_for_the_whole_batch(add_basic_macros_installed):
+    """The point of execute_circuits over calling execute_circuit in a loop:
+    every circuit is submitted together as a single QMBackend.run(...) job,
+    not one job per circuit."""
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+
+    circuits = [Circuit(2) for _ in range(3)]
+    for circuit in circuits:
+        circuit.add(gates.CZ(0, 1))
+        circuit.add(gates.M(0, 1))
+
+    with (
+        patch.object(backend.qiskit_backend, "run") as mock_run,
+        patch("qibo_qm_provider.backend.qibo_qm_backend.translate_measurements"),
+    ):
+        backend.execute_circuits(circuits)
+
+    assert mock_run.call_count == 1
+    (qcs,), kwargs = mock_run.call_args
+    assert len(qcs) == 3
+    assert kwargs["memory"] is True
+
+
+def test_execute_circuits_translates_each_circuit_with_its_own_experiment_index(
+    add_basic_macros_installed,
+):
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+
+    circuits = [Circuit(2) for _ in range(3)]
+    for circuit in circuits:
+        circuit.add(gates.CZ(0, 1))
+        circuit.add(gates.M(0, 1))
+
+    with (
+        patch.object(backend.qiskit_backend, "run") as mock_run,
+        patch(
+            "qibo_qm_provider.backend.qibo_qm_backend.translate_measurements"
+        ) as mock_translate,
+    ):
+        outcomes = backend.execute_circuits(circuits)
+
+    assert len(outcomes) == 3
+    assert [call.kwargs["experiment_index"] for call in mock_translate.call_args_list] == [
+        0,
+        1,
+        2,
+    ]
+
+
+def test_execute_circuits_transpiles_non_native_gates_by_default(add_basic_macros_installed):
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    _install_gpi2_macro(backend, add_basic_macros_installed)
+    assert "H" not in backend.natives
+
+    circuits = []
+    for _ in range(2):
+        circuit = Circuit(1)
+        circuit.add(gates.H(0))
+        circuit.add(gates.M(0))
+        circuits.append(circuit)
+
+    with (
+        patch.object(backend.qiskit_backend, "run") as mock_run,
+        patch("qibo_qm_provider.backend.qibo_qm_backend.translate_measurements"),
+    ):
+        with pytest.warns(UserWarning, match="H"):
+            backend.execute_circuits(circuits)
+
+    (qcs,), _ = mock_run.call_args
+    for qc in qcs:
+        assert "h" not in [instr.operation.name for instr in qc.data]
+
+
+def test_execute_circuits_prepends_initial_state_to_every_circuit(add_basic_macros_installed):
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+
+    initial_state = Circuit(2)
+    initial_state.add(gates.I(0))
+
+    circuits = [Circuit(2) for _ in range(2)]
+    for circuit in circuits:
+        circuit.add(gates.CZ(0, 1))
+        circuit.add(gates.M(0, 1))
+
+    with (
+        patch.object(backend.qiskit_backend, "run") as mock_run,
+        patch("qibo_qm_provider.backend.qibo_qm_backend.translate_measurements"),
+    ):
+        backend.execute_circuits(circuits, initial_state=initial_state)
+
+    (qcs,), _ = mock_run.call_args
+    for qc in qcs:
+        assert [instr.operation.name for instr in qc.data] == ["id", "cz", "measure", "measure"]
+
+
 def test_update_target_delegates_to_wrapped_backend(backend, dummy_machine):
     # Manually install a macro (bypassing register_gate) then confirm the
     # thin update_target() delegate actually resyncs the registry. "foo" has

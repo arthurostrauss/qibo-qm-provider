@@ -403,3 +403,65 @@ class QiboQMBackend(NumpyBackend):
         outcome = MeasurementOutcomes(circuit.measurements, self, nshots=nshots)
         translate_measurements(circuit, qc, result)
         return outcome
+
+    def execute_circuits(
+        self,
+        circuits: List[QiboCircuit],
+        initial_state=None,
+        nshots: int = 1000,
+        transpile: bool = True,
+    ) -> List[MeasurementOutcomes]:
+        """Execute several circuits on the wrapped QM machine as one job.
+
+        Batched analog of :meth:`execute_circuit`: every circuit goes
+        through the exact same steps (initial-state prepending, symbolic-
+        parameter rejection, optional default transpilation, Qibo->Qiskit
+        conversion, connectivity validation) and is then submitted together
+        as a single ``QMBackend.run(list_of_qc, ...)`` job -- one job for
+        the whole batch rather than one per circuit -- with each circuit's
+        measurements translated back from its own slot in the shared
+        ``Result`` (``experiment_index``).
+
+        Args:
+            circuit: See :meth:`execute_circuit`; applied identically to
+                every circuit in ``circuits``.
+            initial_state: A Qibo circuit prepended to every circuit in
+                ``circuits``, or ``None``.
+            nshots: Number of shots to sample, shared by every circuit.
+            transpile: See :meth:`execute_circuit`.
+        """
+        if isinstance(initial_state, QiboCircuit):
+            return self.execute_circuits(
+                [initial_state + circuit for circuit in circuits],
+                nshots=nshots,
+                transpile=transpile,
+            )
+        if initial_state is not None:
+            raise_error(ValueError, "QiboQMBackend only supports circuits as initial states.")
+        for circuit in circuits:
+            if circuit_has_symbols(circuit):
+                raise_error(
+                    ValueError,
+                    "QiboQMBackend.execute_circuits does not support a circuit with "
+                    "symbolic parameters -- it returns MeasurementOutcomes, which "
+                    "presupposes one concrete circuit and shot count. Bind the "
+                    "parameters first (circuit.set_parameters(...)), or use "
+                    "circuit_to_qua(circuit) directly for real-time parameterization.",
+                )
+
+        if transpile:
+            circuits = [self._default_transpile(circuit) for circuit in circuits]
+
+        qubit_dict = self._qiskit_backend.qubit_dict
+        qcs = [qibo_circuit_to_qiskit(circuit, qubit_dict=qubit_dict) for circuit in circuits]
+        for qc in qcs:
+            validate_two_qubit_connectivity(qc, self._qiskit_backend.qubit_pair_dict, qubit_dict)
+        job = self._qiskit_backend.run(qcs, shots=nshots, memory=True)
+        result = job.result()
+
+        outcomes = []
+        for index, (circuit, qc) in enumerate(zip(circuits, qcs)):
+            outcome = MeasurementOutcomes(circuit.measurements, self, nshots=nshots)
+            translate_measurements(circuit, qc, result, experiment_index=index)
+            outcomes.append(outcome)
+        return outcomes
