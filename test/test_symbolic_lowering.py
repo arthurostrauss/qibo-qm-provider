@@ -1,16 +1,9 @@
 """Tests for the symbolic (sympy-parameter) Qibo-circuit -> QUA lowering path.
 
-This path exists because ``qibo.models.Circuit`` accepts a ``sympy`` expression
-as a gate parameter but ``Circuit.to_qasm()`` cannot express one -- it raises
-``TypeError: Cannot convert expression to float``, since OpenQASM2 has no
-symbolic ``input``. So for symbolic circuits ``qibo_circuit_to_qiskit`` bypasses
-``to_qasm()`` and builds the Qiskit circuit gate by gate instead.
-
-The single most important test here is
-``test_direct_builder_matches_openqasm2_path``: the OpenQASM2 route is already
-hardware-validated, so pinning the new builder against it on concrete circuits
-is what makes the new route trustworthy. Everything else checks a specific
-claim recorded in the implementation notes.
+``qibo.models.Circuit`` accepts a ``sympy`` expression as a gate parameter;
+``qibo_circuit_to_qiskit``/``build_qiskit_circuit_directly`` (one and the same
+function's public entry point, see ``circuit_conversion``'s module docstring)
+maps each sympy symbol to a Qiskit ``Parameter``.
 """
 
 from __future__ import annotations
@@ -28,7 +21,6 @@ from qiskit.quantum_info import Operator
 from qibo_qm_provider import (
     QiboParameterTable,
     QiboQMBackend,
-    build_qiskit_circuit_directly,
     circuit_has_symbols,
     qibo_circuit_to_qiskit,
 )
@@ -95,81 +87,13 @@ def _measurement_map(qc: QuantumCircuit) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# 1. the direct builder agrees with the already-validated OpenQASM2 path
+# 1. the direct builder agrees with Qibo's own unitary
+#
+# The OpenQASM2 round-trip this used to be pinned against is gone (see
+# circuit_conversion's module docstring) -- qibo_circuit_to_qiskit *is*
+# build_qiskit_circuit_directly now, so an equivalence test between them
+# would be trivially true. What still matters is agreement with Qibo itself.
 # --------------------------------------------------------------------------- #
-def _concrete_circuits():
-    c1 = Circuit(2)
-    c1.add(gates.X(0))
-    c1.add(gates.RZ(1, theta=0.3))
-    c1.add(gates.CZ(0, 1))
-
-    c2 = Circuit(3)
-    c2.add(gates.H(0))
-    c2.add(gates.CNOT(0, 1))
-    c2.add(gates.RX(2, theta=0.7))
-    c2.add(gates.SWAP(1, 2))
-
-    c3 = Circuit(2)
-    c3.add(gates.U3(0, theta=0.2, phi=0.4, lam=0.6))
-    c3.add(gates.CRX(0, 1, theta=0.9))
-
-    c4 = Circuit(2)
-    c4.add(gates.RY(0, theta=1.1))
-    c4.add(gates.RZZ(0, 1, theta=0.25))
-    return [("xz_cz", c1), ("h_cnot_rx_swap", c2), ("u3_crx", c3), ("ry_rzz", c4)]
-
-
-@pytest.mark.parametrize("label,circuit", _concrete_circuits(), ids=[c[0] for c in _concrete_circuits()])
-def test_direct_builder_matches_openqasm2_path(label, circuit):
-    """The direct builder is semantically identical to the hardware-validated
-    OpenQASM2 route on circuits that route can handle.
-
-    Compared as unitaries rather than instruction-name lists on purpose:
-    ``qiskit.qasm2.loads`` normalises some standard-library gates (notably
-    ``id`` -> ``u(0,0,0)``), so name equality is not the contract -- semantic
-    equivalence is.
-    """
-    via_qasm = qibo_circuit_to_qiskit(circuit)
-    direct = build_qiskit_circuit_directly(circuit)
-
-    assert direct.num_qubits == via_qasm.num_qubits
-    assert _equal_up_to_phase(_qiskit_unitary(direct), _qiskit_unitary(via_qasm))
-    # and both agree with Qibo itself, so neither is "consistently wrong"
-    assert _equal_up_to_phase(_qiskit_unitary(direct), _qibo_unitary(circuit))
-
-
-def test_direct_builder_matches_openqasm2_measurement_structure():
-    """Classical-register naming/ordering is a contract, not an implementation
-    detail: ``translate_measurements`` reads registers back by name, size and
-    declaration order.
-    """
-    circuit = Circuit(3)
-    circuit.add(gates.X(0))
-    circuit.add(gates.M(0, 2))
-    circuit.add(gates.M(1))
-
-    via_qasm = qibo_circuit_to_qiskit(circuit)
-    direct = build_qiskit_circuit_directly(circuit)
-
-    assert [(r.name, r.size) for r in direct.cregs] == [(r.name, r.size) for r in via_qasm.cregs]
-    assert _measurement_map(direct) == _measurement_map(via_qasm)
-
-
-def test_identity_stays_id_on_both_paths():
-    """Regression test for bug #3 (``I`` arriving as a generic ``u(0,0,0)``).
-
-    The direct builder appends a real ``IGate`` and never produces OpenQASM2
-    text, so it was never affected. The OpenQASM2 route was, and is now fixed by
-    passing ``qasm2.LEGACY_CUSTOM_INSTRUCTIONS`` -- Qibo emits
-    ``include "qelib1.inc"``, and those are that library's definitions.
-    """
-    circuit = Circuit(1)
-    circuit.add(gates.I(0))
-
-    assert [i.operation.name for i in build_qiskit_circuit_directly(circuit).data] == ["id"]
-    assert [i.operation.name for i in qibo_circuit_to_qiskit(circuit).data] == ["id"]
-
-
 @pytest.mark.parametrize(
     "gate,nqubits",
     [
@@ -177,15 +101,12 @@ def test_identity_stays_id_on_both_paths():
         (gates.CRX(0, 1, 0.3), 2),
         (gates.RZZ(0, 1, 0.3), 2),
         (gates.RXX(0, 1, 0.3), 2),
+        (gates.H(0), 1),
+        (gates.I(0), 1),
     ],
-    ids=["swap", "crx", "rzz", "rxx"],
+    ids=["swap", "crx", "rzz", "rxx", "h", "i"],
 )
-def test_qelib1_gates_parse_on_openqasm2_path(gate, nqubits):
-    """These are ordinary ``qelib1.inc`` gates, but Qiskit's OQ2 parser does not
-    build the whole library in -- without ``LEGACY_CUSTOM_INSTRUCTIONS`` each
-    raised ``QASM2ParseError: '<gate>' is not defined in this scope``. Found by
-    the equivalence test above.
-    """
+def test_concrete_gates_match_qibo_unitary(gate, nqubits):
     circuit = Circuit(nqubits)
     circuit.add(gate)
 
@@ -798,8 +719,8 @@ def test_macro_installed_before_backend_construction_is_used(add_basic_macros_in
     assert len(received) == 1
 
 
-def test_concrete_circuit_still_compiles_through_the_old_path(add_basic_macros_installed):
-    """The OpenQASM2 route must be untouched by any of the above."""
+def test_concrete_circuit_still_compiles_without_parameters(add_basic_macros_installed):
+    """A concrete (non-symbolic) circuit must be unaffected by any of the above."""
     from qm.qua import program
 
     circuit = Circuit(1)

@@ -7,6 +7,9 @@ precedence, QUA program construction, QM connection handling, job submission,
 and result fetching are all inherited unchanged by delegating to the wrapped
 ``QMBackend`` (see ``self.qiskit_backend``). The only new logic here is:
 
+* decomposing any gate ``execute_circuit`` receives that isn't already native
+  to this machine (``default_transpile.default_transpile``, opt out via
+  ``transpile=False``),
 * converting a Qibo ``Circuit`` into the Qiskit ``QuantumCircuit`` that
   ``QMBackend`` expects (``circuit_conversion.qibo_circuit_to_qiskit``), and
 * translating the resulting Qiskit ``Result`` back onto Qibo's per-gate
@@ -28,7 +31,8 @@ from qiskit_qm_provider.parameter_table import InputType, Parameter, ParameterTa
 from quam.core import QuamRoot
 
 from .circuit_conversion import qibo_circuit_to_qiskit, validate_two_qubit_connectivity
-from .gate_map import OPERATION_NAME_TO_NATIVE_GATE
+from .default_transpile import default_transpile
+from .gate_map import OPERATION_NAME_TO_NATIVE_GATE, QIBO_TO_OPERATION_NAME
 from .measurement_translation import translate_measurements
 from .parameter_table import QiboParameterTable
 from .symbolic_parameters import circuit_has_symbols, validate_symbol_name
@@ -232,6 +236,27 @@ class QiboQMBackend(NumpyBackend):
             "QiboQMBackend cannot apply gates directly; it executes circuits on QM hardware.",
         )
 
+    def _default_transpile(self, circuit: QiboCircuit) -> QiboCircuit:
+        """The gate-decomposition step :meth:`execute_circuit` runs by
+        default (``transpile=True``) -- see :func:`~qibo_qm_provider.
+        backend.default_transpile.default_transpile`.
+
+        ``already_native`` is deliberately the wrapped ``QMBackend``'s full,
+        unfiltered ``target.operation_names`` (mapped back to Qibo gate
+        names), not :attr:`natives` -- :attr:`natives` is narrowed to
+        ``qibo.transpiler.unroller.NativeGates``'s nine members for an
+        unrelated reason (see its docstring) and would otherwise make this
+        step force-decompose e.g. an installed ``gpi``/``prx``/``u1q``/``ms``
+        macro that is perfectly native to this machine.
+        """
+        operation_names = self._qiskit_backend.target.operation_names
+        already_native = {
+            qibo_name for qibo_name, op_name in QIBO_TO_OPERATION_NAME.items() if op_name in operation_names
+        }
+        return default_transpile(
+            circuit, already_native=already_native, decomposition_targets=self.natives
+        )
+
     def circuit_to_qua(
         self,
         circuit: QiboCircuit,
@@ -247,6 +272,10 @@ class QiboQMBackend(NumpyBackend):
         ``execute_circuit``, this accepts a circuit with symbolic (``sympy``)
         gate parameters, since it returns the compiled QUA program directly
         rather than a fixed-shot-count ``MeasurementOutcomes``.
+
+        Unlike ``execute_circuit``, this path does **not** run the default
+        gate-decomposition step -- pass an already-native circuit (or
+        decompose yourself) before calling.
 
         Converts ``circuit`` to a Qiskit ``QuantumCircuit`` exactly once and
         builds ``param_table`` from that same object, rather than the two
@@ -303,9 +332,29 @@ class QiboQMBackend(NumpyBackend):
         circuit: QiboCircuit,
         initial_state=None,
         nshots: int = 1000,
+        transpile: bool = True,
     ) -> MeasurementOutcomes:
+        """Execute ``circuit`` on the wrapped QM machine.
+
+        Args:
+            circuit: A concrete Qibo circuit (no symbolic parameters -- use
+                :meth:`circuit_to_qua` for those).
+            initial_state: A Qibo circuit to prepend, or ``None``.
+            nshots: Number of shots to sample.
+            transpile: When ``True`` (default), decompose any gate not
+                already native to this machine into its native gate set
+                before compiling, via :func:`~qibo_qm_provider.backend.
+                default_transpile.default_transpile` -- e.g. a plain ``H``
+                on a machine with no ``h`` macro. A decomposition emits a
+                ``UserWarning`` naming the gates involved. When ``False``,
+                skip that step only -- there is no pre-check that the
+                circuit is already native; a non-native gate still fails
+                later at compile time with the prior error path (e.g. a
+                qm_qasm ``CompilationException``), not a guaranteed
+                ``UnsupportedGateError`` from this method.
+        """
         if isinstance(initial_state, QiboCircuit):
-            return self.execute_circuit(initial_state + circuit, nshots=nshots)
+            return self.execute_circuit(initial_state + circuit, nshots=nshots, transpile=transpile)
         if initial_state is not None:
             raise_error(ValueError, "QiboQMBackend only supports circuits as initial states.")
         if circuit_has_symbols(circuit):
@@ -317,6 +366,8 @@ class QiboQMBackend(NumpyBackend):
                 "parameters first (circuit.set_parameters(...)), or use "
                 "circuit_to_qua(circuit) directly for real-time parameterization.",
             )
+        if transpile:
+            circuit = self._default_transpile(circuit)
 
         qubit_dict = self._qiskit_backend.qubit_dict
         qc = qibo_circuit_to_qiskit(circuit, qubit_dict=qubit_dict)

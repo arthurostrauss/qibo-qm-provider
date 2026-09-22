@@ -1,15 +1,20 @@
 """Tests for qibo_qm_provider.backend.qibo_qm_platform_backend.QiboQMPlatformBackend
 and the qibo_qm_provider.MetaBackend entrypoint.
 
-Does not test execute_circuit(s)/.connect() -- those are inherited
-unchanged from qibolab's QibolabBackend and are exercised by qibolab's own
-test suite. The fixtures used here (dummy_machine/add_basic_macros_installed)
+Does not test actual pulse execution/``.connect()`` -- those are inherited
+unchanged from qibolab's ``QibolabBackend`` and are exercised by qibolab's
+own test suite. The fixtures used here (dummy_machine/add_basic_macros_installed)
 are Octave-less IQ machines with no `network`, so Platform.instruments comes
 back empty for them regardless (see test_quam_wiring.py for the
-working-instruments path, using the mw_fem_machine fixture). This file only
-proves QiboQMPlatformBackend's own additions: construction, refresh(), and
-entrypoint wiring.
+working-instruments path, using the mw_fem_machine fixture). ``execute_circuit``
+itself *is* tested here (see the "default transpile" section below), since
+this class overrides it to add a default gate-decomposition step -- the
+inherited compile/execute call it delegates to afterwards is what is left
+untested. Otherwise this file only proves QiboQMPlatformBackend's own
+additions: construction, refresh(), and entrypoint wiring.
 """
+
+from unittest.mock import patch
 
 import pytest
 
@@ -141,3 +146,94 @@ def test_circuit_to_qua_macro_compiles_and_emits(mw_fem_machine):
 
     assert len(macro.measurement_map) == 1
     assert len(macro.acquisitions) == 1
+
+
+# ---------------------------------------------------------------------------
+# execute_circuit's default transpile step (issue #4)
+#
+# qibolab's own Compiler.compile never checks a gate against the platform's
+# native gates and decomposes it if not -- it documents that the circuit it
+# receives must already "respect the platform's connectivity and native
+# gates". QibolabBackend.execute_circuit is patched out below (it needs a
+# live platform.connect()/execute()) purely to capture the circuit this
+# override hands it, proving the decomposition happened before delegating.
+# ---------------------------------------------------------------------------
+
+
+def test_execute_circuit_transpiles_a_non_native_gate_by_default(add_basic_macros_installed):
+    from qibo import Circuit, gates
+
+    backend = QiboQMPlatformBackend.from_machine(add_basic_macros_installed)
+    assert "H" not in backend.natives  # H is not native on this fixture
+
+    circuit = Circuit(1)
+    circuit.add(gates.H(0))
+    circuit.add(gates.M(0))
+
+    with patch("qibolab._core.backends.QibolabBackend.execute_circuit") as mock_execute:
+        with pytest.warns(UserWarning, match="H"):
+            backend.execute_circuit(circuit)
+
+    (received_circuit,), _ = mock_execute.call_args
+    assert "H" not in [type(g).__name__ for g in received_circuit.queue]
+
+
+def test_execute_circuit_transpile_false_leaves_a_non_native_gate_untouched(add_basic_macros_installed):
+    """qibolab's own Compiler.compile raises its own error for an unknown
+    gate; this override must not intercept that when transpile=False."""
+    from qibo import Circuit, gates
+
+    backend = QiboQMPlatformBackend.from_machine(add_basic_macros_installed)
+
+    circuit = Circuit(1)
+    circuit.add(gates.H(0))
+    circuit.add(gates.M(0))
+
+    with patch("qibolab._core.backends.QibolabBackend.execute_circuit") as mock_execute:
+        backend.execute_circuit(circuit, transpile=False)
+
+    (received_circuit,), _ = mock_execute.call_args
+    assert [type(g).__name__ for g in received_circuit.queue] == ["H", "M"]
+
+
+def test_execute_circuit_already_native_gate_is_unaffected_by_transpile(add_basic_macros_installed):
+    import warnings
+
+    from qibo import Circuit, gates
+
+    backend = QiboQMPlatformBackend.from_machine(add_basic_macros_installed)
+    assert "CZ" in backend.natives
+
+    circuit = Circuit(2)
+    circuit.add(gates.CZ(0, 1))
+    circuit.add(gates.M(0, 1))
+
+    with patch("qibolab._core.backends.QibolabBackend.execute_circuit") as mock_execute:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            backend.execute_circuit(circuit)
+
+    assert not caught
+    (received_circuit,), _ = mock_execute.call_args
+    assert [type(g).__name__ for g in received_circuit.queue] == ["CZ", "M"]
+
+
+def test_execute_circuit_combines_initial_state_before_transpiling(add_basic_macros_installed):
+    """A gate arriving only via initial_state must be transpiled too -- the
+    override must combine before calling default_transpile, not after."""
+    from qibo import Circuit, gates
+
+    backend = QiboQMPlatformBackend.from_machine(add_basic_macros_installed)
+
+    initial_state = Circuit(1)
+    initial_state.add(gates.H(0))
+    circuit = Circuit(1)
+    circuit.add(gates.M(0))
+
+    with patch("qibolab._core.backends.QibolabBackend.execute_circuit") as mock_execute:
+        with pytest.warns(UserWarning, match="H"):
+            backend.execute_circuit(circuit, initial_state=initial_state)
+
+    (received_circuit,), received_kwargs = mock_execute.call_args
+    assert "H" not in [type(g).__name__ for g in received_circuit.queue]
+    assert received_kwargs["initial_state"] is None

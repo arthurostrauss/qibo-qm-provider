@@ -2,10 +2,12 @@
 built directly from QuAM.
 
 This is a second, separate execution path alongside ``QiboQMBackend``: it
-subclasses ``qibolab._core.backends.QibolabBackend`` and inherits
-``execute_circuit``/``execute_circuits`` unchanged (qibolab's own
+subclasses ``qibolab._core.backends.QibolabBackend`` and, apart from a
+default gate-decomposition step ``execute_circuit`` adds (see its
+docstring), inherits execution unchanged (qibolab's own
 ``Compiler.compile`` + ``platform.execute`` -- no OpenQASM round-trip,
-unlike ``QiboQMBackend``). See ``qibolab_platform_from_quam_plan.md`` and
+unlike ``QiboQMBackend``). ``execute_circuits`` is inherited as-is, with no
+equivalent decomposition step. See ``qibolab_platform_from_quam_plan.md`` and
 ``qibo_backend_vs_qibolab_platform.md`` (repo root) for the full design
 rationale; in particular, this exists to reuse Qibocal's existing
 calibration protocols (written purely against ``platform.execute``/
@@ -31,6 +33,8 @@ from __future__ import annotations
 from typing import Callable, Optional, Union
 
 from qibo.models import Circuit
+from qibo.result import MeasurementOutcomes
+from qibo.transpiler.unroller import NativeGates
 from qibolab import Platform
 from qibolab._core.backends import QibolabBackend
 from qibolab._core.sequence import PulseSequence
@@ -42,6 +46,7 @@ from ..qibolab_bridge.platform_from_quam import (
     quam_to_qibolab_platform,
 )
 from ..qibolab_bridge.qua_macros import ParameterTarget, sequence_to_qua_macro
+from .default_transpile import default_transpile
 
 __all__ = ["QiboQMPlatformBackend"]
 
@@ -77,6 +82,56 @@ class QiboQMPlatformBackend(QibolabBackend):
         """
         super().__init__(platform)
         self.machine = machine
+
+    def execute_circuit(
+        self,
+        circuit: Circuit,
+        initial_state: Optional[Circuit] = None,
+        nshots: int = 1000,
+        transpile: bool = True,
+    ) -> MeasurementOutcomes:
+        """Execute ``circuit`` on ``self.platform``.
+
+        Identical to ``QibolabBackend.execute_circuit`` (inherited
+        unchanged, see class docstring) except for ``transpile``: qibolab's
+        own ``Compiler.compile`` never checks a gate against the platform's
+        native gates and decomposes it if not (confirmed against issue #4)
+        -- it expects a circuit that "respects the platform's ... native
+        gates" already. This override adds that check as a default,
+        opt-out-able step, via :func:`~qibo_qm_provider.backend.
+        default_transpile.default_transpile`, using :attr:`natives`
+        (``QibolabBackend.natives``, inherited unchanged) as both what
+        counts as already-native and what a non-native gate may be
+        decomposed into. ``circuit.wire_names`` is preserved untouched --
+        ``self.compiler.compile`` reads it directly for physical qubit
+        placement, and this step never re-places qubits, only rewrites
+        gates.
+
+        Args:
+            circuit: A Qibo circuit.
+            initial_state: A Qibo circuit to prepend, or ``None``.
+            nshots: Number of shots to sample.
+            transpile: When ``True`` (default), decompose any gate not
+                already native to ``self.platform`` before compiling. A
+                decomposition emits a ``UserWarning`` naming the gates
+                involved. When ``False``, skip that step only -- there is
+                no pre-check that the circuit is already native; a
+                non-native gate still fails later inside qibolab's
+                compiler / execute path. Note ``execute_circuits`` never
+                applies this step.
+        """
+        if isinstance(initial_state, Circuit):
+            circuit = initial_state + circuit
+            initial_state = None
+        if transpile:
+            circuit = default_transpile(
+                circuit,
+                already_native=self.natives,
+                decomposition_targets=[
+                    name for name in self.natives if name in NativeGates.__members__ and name != "NONE"
+                ],
+            )
+        return super().execute_circuit(circuit, initial_state=initial_state, nshots=nshots)
 
     @classmethod
     def from_iqcc(
@@ -207,6 +262,10 @@ class QiboQMPlatformBackend(QibolabBackend):
         ``self.compiler.compile(circuit, self.platform)`` (the same step
         ``execute_circuit`` uses internally), then convert it into a
         reusable QUA macro via :meth:`sequence_to_qua_macro`.
+
+        Unlike ``execute_circuit``, this path does **not** run the default
+        gate-decomposition step -- pass an already-native circuit (or
+        decompose yourself) before calling.
 
         The qibolab-native analogue of
         ``qiskit_qm_provider.QMBackend.quantum_circuit_to_qua`` -- unlike

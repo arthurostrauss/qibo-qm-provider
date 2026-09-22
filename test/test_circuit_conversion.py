@@ -64,41 +64,29 @@ def test_multiple_measurement_gates_get_distinct_registers():
     assert names == {m.register_name for m in circuit.measurements}
 
 
-def test_extended_compatibility_allows_non_standard_gates():
+def test_gpi_gate_is_supported_directly():
     """gpi/gpi2 have no entry in OpenQASM2's standard qelib1.inc library, so
-    qiskit.qasm2.loads rejects them (QASM2ParseError: not defined in this
-    scope) unless Circuit.to_qasm() also emits an inline decomposition --
-    confirmed empirically, not assumed. extended_compatibility=True (the
-    default) requests that decomposition."""
+    the old OpenQASM2 round-trip needed a special-cased inline decomposition
+    to accept them at all (removed along with that route, see
+    circuit_conversion's module docstring). The direct builder maps them
+    through gate_map.QIBO_TO_QISKIT like any other gate."""
     circuit = Circuit(1)
     circuit.add(gates.GPI(0, phi=0.3))
     circuit.add(gates.M(0))
 
-    qc = qibo_circuit_to_qiskit(circuit)  # default extended_compatibility=True
+    qc = qibo_circuit_to_qiskit(circuit)
 
     assert [instr.operation.name for instr in qc.data][0] == "gpi"
-
-
-def test_extended_compatibility_false_rejects_non_standard_gates():
-    from qiskit.qasm2.exceptions import QASM2ParseError
-
-    circuit = Circuit(1)
-    circuit.add(gates.GPI(0, phi=0.3))
-    circuit.add(gates.M(0))
-
-    with pytest.raises(QASM2ParseError):
-        qibo_circuit_to_qiskit(circuit, extended_compatibility=False)
 
 
 def test_align_gate_is_explicitly_unsupported():
     """qibo.gates.Align(q, delay=0) is a single-qubit synchronization gate
     (aligning multiple qubits means adding one Align per qubit, not a single
     variadic-qubit gate -- gates.Align(0, 1) would actually mean q=0,
-    delay=1, not "align qubits 0 and 1"). It has no OpenQASM representation;
-    Circuit.to_qasm() raises NotImplementedError directly (confirmed
-    empirically against qibo 0.3.3), regardless of which qubit(s)/delay are
-    used. This must surface as an actionable, provider-specific error, not
-    silently drop the gate or produce an incorrect circuit."""
+    delay=1, not "align qubits 0 and 1"). It has no representation on this
+    path at all (gate_map.DEFERRED_GATES), regardless of which qubit(s)/delay
+    are used. This must surface as an actionable, provider-specific error,
+    not silently drop the gate or produce an incorrect circuit."""
     circuit = Circuit(2)
     circuit.add(gates.X(0))
     circuit.add(gates.Align(0, delay=10))
