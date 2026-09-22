@@ -32,7 +32,7 @@ from quam.core import QuamRoot
 
 from .circuit_conversion import qibo_circuit_to_qiskit, validate_two_qubit_connectivity
 from .default_transpile import default_transpile
-from .gate_map import OPERATION_NAME_TO_NATIVE_GATE, QIBO_TO_OPERATION_NAME
+from .gate_map import enum_compatible_quam_natives
 from .measurement_translation import translate_measurements
 from .parameter_table import QiboParameterTable
 from .symbolic_parameters import circuit_has_symbols, validate_symbol_name
@@ -106,35 +106,19 @@ class QiboQMBackend(NumpyBackend):
 
     @property
     def natives(self) -> List[str]:
-        """The Qibo-native gate names this machine can execute.
+        """The Enum-compatible, QuAM-backed native gate names for this machine.
 
-        Filters the wrapped ``QMBackend``'s raw ``target.operation_names``
-        -- Qiskit operation-name strings, which also include Qiskit-only
-        control-flow ops (``if_else``, ``for_loop``, ...) and a bespoke
-        ``Instruction`` for any QuAM macro whose name isn't a recognized
-        Qiskit gate -- down to Qibo's own gate names, via
-        ``gate_map.OPERATION_NAME_TO_NATIVE_GATE``.
-
-        This isn't just narrowing for tidiness: Qibo's own default
-        transpiler construction looks native gates up as
-        ``NativeGates[backend.natives]`` (``qibo.backends.__init__``'s
-        ``_default_transpiler``), and ``NativeGates`` is a closed
-        ``enum.Flag`` matched by exact, case-sensitive member name -- the raw
-        lowercase operation strings this property used to return (e.g.
-        ``"cz"``) never matched a member (``"CZ"``) and silently resolved to
-        ``NativeGates.NONE``. Access ``self.qiskit_backend.target.
-        operation_names`` directly for the unfiltered, machine-level view
-        (e.g. to see custom macro names like ones installed via
-        ``register_gate``).
+        Shared definition with ``QiboQMPlatformBackend.natives`` (issue #6):
+        the intersection of QuAM macros installed on the wrapped machine
+        (via the wrapped ``QMBackend``'s ``target.operation_names``) and
+        :data:`~qibo_qm_provider.backend.gate_map.ENUM_COMPATIBLE_NATIVE_GATES`
+        -- the most restrictive set both Qibo's ``NativeGates`` and
+        qibolab's default ``Compiler`` accept. Custom macros outside that
+        Enum intersection are intentionally omitted; inspect
+        ``self.qiskit_backend.target.operation_names`` for the unfiltered
+        machine-level view.
         """
-        operation_names = self._qiskit_backend.target.operation_names
-        return sorted(
-            {
-                OPERATION_NAME_TO_NATIVE_GATE[op]
-                for op in operation_names
-                if op in OPERATION_NAME_TO_NATIVE_GATE
-            }
-        )
+        return enum_compatible_quam_natives(self._qiskit_backend.target.operation_names)
 
     def update_target(self, input_type: Optional[InputType] = None) -> None:
         """Resynchronize the qm-qasm operation registry with whatever macros
@@ -241,20 +225,14 @@ class QiboQMBackend(NumpyBackend):
         default (``transpile=True``) -- see :func:`~qibo_qm_provider.
         backend.default_transpile.default_transpile`.
 
-        ``already_native`` is deliberately the wrapped ``QMBackend``'s full,
-        unfiltered ``target.operation_names`` (mapped back to Qibo gate
-        names), not :attr:`natives` -- :attr:`natives` is narrowed to
-        ``qibo.transpiler.unroller.NativeGates``'s nine members for an
-        unrelated reason (see its docstring) and would otherwise make this
-        step force-decompose e.g. an installed ``gpi``/``prx``/``u1q``/``ms``
-        macro that is perfectly native to this machine.
+        Both ``already_native`` and ``decomposition_targets`` use
+        :attr:`natives` (the shared Enum∩QuAM-macro set from issue #6).
+        Gates outside that set -- including QuAM macros that are not
+        Enum-compatible -- are not treated as already-native here; pass
+        ``transpile=False`` if you need to compile such a circuit as-is.
         """
-        operation_names = self._qiskit_backend.target.operation_names
-        already_native = {
-            qibo_name for qibo_name, op_name in QIBO_TO_OPERATION_NAME.items() if op_name in operation_names
-        }
         return default_transpile(
-            circuit, already_native=already_native, decomposition_targets=self.natives
+            circuit, already_native=self.natives, decomposition_targets=self.natives
         )
 
     def circuit_to_qua(

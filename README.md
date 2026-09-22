@@ -160,6 +160,7 @@ assert type(qibo.backends._Global.backend()).__name__ == "QibolabBackend"
 | Circuit lowering | `qiskit-qm-provider`'s `qm_qasm.Compiler`, via OpenQASM3 | `qibolab`'s own `Compiler` (native-gate rules → `PulseSequence`) |
 | Machine/operation registry | `qiskit_qm_provider.QMBackend`'s `Target` + macro dict, read from QuAM | a qibolab `Platform` built once from QuAM (this package's `qibolab_bridge`) |
 | Execution | `qiskit_qm_provider.QMBackend.run()` → `QMJob`/`CloudQMJob` | qibolab's `QmController` (local) or `IQCCQmController` (IQCC, dispatched automatically from the machine's own `network` config) — hardware-validated for config generation and offline compilation; the IQCC path is offline-verified but **not yet re-run against real IQCC hardware** |
+| Native gate set (`.natives`) | Shared Enum∩QuAM-macro set (`gate_map.enum_compatible_quam_natives`) | Same shared set (overrides inherited qibolab list when `machine` is known) |
 | Real-time parameters | circuit-level, symbolic (`sympy` → live QUA variable) | pulse-field level only (`Sweeper`-style amplitude/duration/phase) |
 | Qibocal/Qualibrate fit | none (no calibration binding exists yet on either path) | designed for it — any routine written against `platform.execute(...)` needs no code change |
 

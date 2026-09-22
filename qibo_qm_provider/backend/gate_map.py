@@ -67,6 +67,10 @@ __all__ = [
     "EMITTED_OPERATION_NAMES",
     "DEFERRED_GATES",
     "OPERATION_NAME_TO_NATIVE_GATE",
+    "QIBOLAB_DEFAULT_COMPILER_GATE_NAMES",
+    "ENUM_COMPATIBLE_NATIVE_GATES",
+    "enum_compatible_quam_natives",
+    "collect_quam_macro_operation_names",
 ]
 
 #: ``{qibo gate class name: builder(*translated_params) -> Qiskit gate}``.
@@ -181,13 +185,36 @@ QIBO_TO_OPERATION_NAME = {
 #: so the converter passes this set in as ``forbidden_names``.
 EMITTED_OPERATION_NAMES = frozenset(QIBO_TO_OPERATION_NAME.values()) | {"measure"}
 
+#: Qibo gate class names accepted by ``qibolab``'s default
+#: ``Compiler.default()`` rule table (verified against qibolab's
+#: ``compilers/compiler.py``). Includes ``GPI`` and ``Align``, which are
+#: *not* members of ``qibo.transpiler.unroller.NativeGates``, and excludes
+#: ``U3``, which *is* a ``NativeGates`` member but has no default qibolab
+#: compiler rule.
+QIBOLAB_DEFAULT_COMPILER_GATE_NAMES = frozenset(
+    {"I", "Z", "RZ", "CZ", "iSWAP", "CNOT", "GPI2", "GPI", "M", "Align"}
+)
+
+#: The shared, most-restrictive native-gate vocabulary both backends expose:
+#: intersection of ``qibo.transpiler.unroller.NativeGates`` (minus ``NONE``)
+#: and :data:`QIBOLAB_DEFAULT_COMPILER_GATE_NAMES`. Custom QuAM macros /
+#: qibolab compiler extras outside this set (``GPI``, ``Align``, ``U3``,
+#: ``PRX``, ``MS``, ``foo``, ...) are intentionally out of scope for
+#: ``.natives``.
+ENUM_COMPATIBLE_NATIVE_GATES = frozenset(
+    name
+    for name in NativeGates.__members__
+    if name != "NONE" and name in QIBOLAB_DEFAULT_COMPILER_GATE_NAMES
+)
+
 #: Operation name -> Qibo native-gate name, restricted to
-#: ``qibo.transpiler.unroller.NativeGates``'s own nine members (``I``, ``Z``,
-#: ``RZ``, ``M``, ``GPI2``, ``U3``, ``CZ``, ``iSWAP``, ``CNOT``). Built by
-#: inverting :data:`QIBO_TO_OPERATION_NAME` and keeping only entries whose
-#: Qibo name is one of those nine -- so e.g. ``"cx"`` (the operation Qiskit
-#: emits for Qibo's ``CNOT``) maps back to ``"CNOT"``, while ``"x"``, ``"gpi"``,
-#: or a QuAM macro name with no Qibo-gate meaning at all are simply absent.
+#: :data:`ENUM_COMPATIBLE_NATIVE_GATES` (``I``, ``Z``, ``RZ``, ``M``,
+#: ``GPI2``, ``CZ``, ``iSWAP``, ``CNOT`` -- not ``U3``). Built by inverting
+#: :data:`QIBO_TO_OPERATION_NAME` and keeping only Enum-compatible entries
+#: -- so e.g. ``"cx"`` (the operation Qiskit emits for Qibo's ``CNOT``)
+#: maps back to ``"CNOT"``, while ``"x"``, ``"gpi"``, ``"u3"``, or a QuAM
+#: macro name with no Enum-compatible Qibo-gate meaning at all are simply
+#: absent.
 #:
 #: This exists because ``NativeGates`` is what Qibo's own default transpiler
 #: construction looks operation names up against
@@ -195,7 +222,9 @@ EMITTED_OPERATION_NAMES = frozenset(QIBO_TO_OPERATION_NAME.values()) | {"measure
 #: ``_default_transpiler``) -- and lookup is by exact, case-sensitive member
 #: name. A lowercase Qiskit operation string like ``"cz"`` never matches the
 #: member ``NativeGates.CZ``, so anything not translated through this table
-#: would silently resolve to ``NativeGates.NONE`` instead of raising.
+#: would silently resolve to ``NativeGates.NONE`` instead of raising. The
+#: further Qibolab-compiler intersection keeps both backends on one
+#: vocabulary (issue #6).
 #:
 #: ``"measure"`` is added explicitly since ``M`` (Qibo's measurement gate) has
 #: no entry in :data:`QIBO_TO_OPERATION_NAME` -- measurement is handled
@@ -203,9 +232,44 @@ EMITTED_OPERATION_NAMES = frozenset(QIBO_TO_OPERATION_NAME.values()) | {"measure
 OPERATION_NAME_TO_NATIVE_GATE = {
     op_name: qibo_name
     for qibo_name, op_name in QIBO_TO_OPERATION_NAME.items()
-    if qibo_name in NativeGates.__members__
+    if qibo_name in ENUM_COMPATIBLE_NATIVE_GATES
 }
 OPERATION_NAME_TO_NATIVE_GATE["measure"] = "M"
+
+
+def enum_compatible_quam_natives(operation_names) -> list:
+    """Map QuAM / Target operation names to Enum-compatible Qibo natives.
+
+    The single source of truth for both ``QiboQMBackend.natives`` and
+    ``QiboQMPlatformBackend.natives`` (issue #6): keep only operations that
+    (a) are present on the machine (``operation_names``) and (b) map into
+    :data:`ENUM_COMPATIBLE_NATIVE_GATES` via
+    :data:`OPERATION_NAME_TO_NATIVE_GATE`.
+    """
+    return sorted(
+        {
+            OPERATION_NAME_TO_NATIVE_GATE[op]
+            for op in operation_names
+            if op in OPERATION_NAME_TO_NATIVE_GATE
+        }
+    )
+
+
+def collect_quam_macro_operation_names(machine) -> set:
+    """Collect QuAM macro names installed on ``machine``'s qubits and pairs.
+
+    Used by ``QiboQMPlatformBackend.natives`` when a live ``machine`` is
+    available, so both backends derive natives from the same QuAM-macro
+    source rather than from qibolab's wider compiler-rule list.
+    """
+    names: set = set()
+    for qubit in (getattr(machine, "qubits", None) or {}).values():
+        macros = getattr(qubit, "macros", None) or {}
+        names.update(macros)
+    for pair in (getattr(machine, "qubit_pairs", None) or {}).values():
+        macros = getattr(pair, "macros", None) or {}
+        names.update(macros)
+    return names
 
 #: Qibo gates deliberately *not* mapped, with the reason. Used to produce an
 #: actionable error rather than a bare KeyError.

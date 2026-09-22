@@ -22,6 +22,21 @@ import qibo_qm_provider
 from qibo_qm_provider import QiboQMPlatformBackend
 
 
+def _install_gpi2_macro(machine, qubit="q0"):
+    """Give ``machine`` a GPI2 macro so a plain H can be decomposed."""
+    from quam.components.macro import QubitMacro
+    from quam.core import quam_dataclass
+
+    @quam_dataclass
+    class _NoOpGPI2(QubitMacro):
+        def apply(self, phi, **kwargs):
+            pass
+
+    machine.qubits[qubit].macros["gpi2"] = _NoOpGPI2()
+
+
+
+
 def test_from_machine_sets_machine_and_platform(add_basic_macros_installed):
     backend = QiboQMPlatformBackend.from_machine(add_basic_macros_installed)
 
@@ -149,6 +164,30 @@ def test_circuit_to_qua_macro_compiles_and_emits(mw_fem_machine):
 
 
 # ---------------------------------------------------------------------------
+# natives unification (issue #6)
+# ---------------------------------------------------------------------------
+
+
+def test_natives_are_enum_compatible_quam_macros(add_basic_macros_installed):
+    """PlatformBackend.natives matches the shared Enum∩QuAM-macro set, not
+    the wider inherited QibolabBackend.natives (which includes GPI/Align)."""
+    backend = QiboQMPlatformBackend.from_machine(add_basic_macros_installed)
+    assert set(backend.natives) == {"I", "RZ", "M", "CZ"}
+    # Custom / compiler-only names stay out of the shared Enum∩QuAM set.
+    assert "GPI" not in backend.natives
+    assert "Align" not in backend.natives
+    assert "H" not in backend.natives
+
+
+def test_natives_without_machine_filters_inherited_list(add_basic_macros_installed):
+    platform = QiboQMPlatformBackend.from_machine(add_basic_macros_installed).platform
+    bare = QiboQMPlatformBackend(platform=platform)
+    assert bare.machine is None
+    for name in bare.natives:
+        assert name in {"I", "Z", "RZ", "M", "GPI2", "CZ", "iSWAP", "CNOT"}
+
+
+# ---------------------------------------------------------------------------
 # execute_circuit's default transpile step (issue #4)
 #
 # qibolab's own Compiler.compile never checks a gate against the platform's
@@ -163,8 +202,10 @@ def test_circuit_to_qua_macro_compiles_and_emits(mw_fem_machine):
 def test_execute_circuit_transpiles_a_non_native_gate_by_default(add_basic_macros_installed):
     from qibo import Circuit, gates
 
+    _install_gpi2_macro(add_basic_macros_installed)
     backend = QiboQMPlatformBackend.from_machine(add_basic_macros_installed)
     assert "H" not in backend.natives  # H is not native on this fixture
+    assert "GPI2" in backend.natives  # needed as a decomposition target
 
     circuit = Circuit(1)
     circuit.add(gates.H(0))
@@ -223,6 +264,7 @@ def test_execute_circuit_combines_initial_state_before_transpiling(add_basic_mac
     override must combine before calling default_transpile, not after."""
     from qibo import Circuit, gates
 
+    _install_gpi2_macro(add_basic_macros_installed)
     backend = QiboQMPlatformBackend.from_machine(add_basic_macros_installed)
 
     initial_state = Circuit(1)
