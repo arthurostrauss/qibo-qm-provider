@@ -92,7 +92,9 @@ implementation — the same default gate-decomposition `QiboQMBackend` gets,
 see `backend/default_transpile.py` above (opt out with `transpile=False`) —
 then delegates to qibolab's own `Compiler.compile` (native-gate rules →
 `PulseSequence`) and `platform.execute(...)`, with no OpenQASM detour at
-all. `execute_circuits` is inherited unchanged, with no equivalent step:
+all. `execute_circuits` is inherited unchanged and has **no** equivalent
+decomposition step (callers must pass already-native circuits, or use
+`execute_circuit` per item):
 
 ```python
 from qibo import Circuit, gates
@@ -163,6 +165,10 @@ assert type(qibo.backends._Global.backend()).__name__ == "QibolabBackend"
 
 ## Compiling a symbolic circuit once, real-time parameterized
 
+`circuit_to_qua` does **not** run the default gate-decomposition step that
+`execute_circuit` applies. Bind parameters and ensure gates are already
+native (or decompose yourself) before calling it.
+
 ```python
 import sympy
 from qibo import Circuit, gates
@@ -191,11 +197,20 @@ with program() as prog:
 
 ## Addressing physical qubits, and two-qubit gate direction
 
-`QiboQMBackend` (unlike `QiboQMPlatformBackend`) has no default transpiler
-step: a circuit's qubit index `i` addresses whichever QuAM qubit sits at
-position `i` of the machine's `active_qubit_names` list, unless you set
-`Circuit(n, wire_names=[...])` to physical qubit names explicitly. Many QM
-two-qubit natives (e.g. a flux-tunable `CZ`) are also physically
+Both `QiboQMBackend` and `QiboQMPlatformBackend` run a default **gate**
+decomposition step in `execute_circuit` (`transpile=True`; opt out with
+`transpile=False`) — e.g. a plain `H` is rewritten into the machine's
+native set before compile. That step never does **placement or routing**:
+a circuit's qubit index `i` still addresses whichever QuAM / platform qubit
+sits at position `i` (or the corresponding platform qubit list), unless you
+set `Circuit(n, wire_names=[...])` to physical qubit names explicitly.
+
+`circuit_to_qua` / `circuit_to_qua_macro` and Platform `execute_circuits`
+do **not** auto-decompose; they expect an already-native circuit (or will
+fail at compile time the old way). See #8 for transpile parity on those
+APIs.
+
+Many QM two-qubit natives (e.g. a flux-tunable `CZ`) are also physically
 **asymmetric** — the flux pulse only plays on one qubit of the pair — so
 `CZ(a, b)` and `CZ(b, a)` are not interchangeable even though Qibo treats
 the gate as order-independent. Writing the wrong direction raises a clear

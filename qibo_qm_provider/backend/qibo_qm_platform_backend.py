@@ -111,11 +111,14 @@ class QiboQMPlatformBackend(QibolabBackend):
             circuit: A Qibo circuit.
             initial_state: A Qibo circuit to prepend, or ``None``.
             nshots: Number of shots to sample.
-            transpile: Decompose any gate not already native to
-                ``self.platform`` before compiling. Defaults to ``True``; a
+            transpile: When ``True`` (default), decompose any gate not
+                already native to ``self.platform`` before compiling. A
                 decomposition emits a ``UserWarning`` naming the gates
-                involved. Pass ``False`` to require an already-native
-                circuit instead.
+                involved. When ``False``, skip that step only -- there is
+                no pre-check that the circuit is already native; a
+                non-native gate still fails later inside qibolab's
+                compiler / execute path. Note ``execute_circuits`` never
+                applies this step.
         """
         if isinstance(initial_state, Circuit):
             circuit = initial_state + circuit
@@ -259,6 +262,10 @@ class QiboQMPlatformBackend(QibolabBackend):
         ``self.compiler.compile(circuit, self.platform)`` (the same step
         ``execute_circuit`` uses internally), then convert it into a
         reusable QUA macro via :meth:`sequence_to_qua_macro`.
+
+        Unlike ``execute_circuit``, this path does **not** run the default
+        gate-decomposition step -- pass an already-native circuit (or
+        decompose yourself) before calling.
 
         The qibolab-native analogue of
         ``qiskit_qm_provider.QMBackend.quantum_circuit_to_qua`` -- unlike

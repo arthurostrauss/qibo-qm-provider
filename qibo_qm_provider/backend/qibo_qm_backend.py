@@ -273,6 +273,10 @@ class QiboQMBackend(NumpyBackend):
         gate parameters, since it returns the compiled QUA program directly
         rather than a fixed-shot-count ``MeasurementOutcomes``.
 
+        Unlike ``execute_circuit``, this path does **not** run the default
+        gate-decomposition step -- pass an already-native circuit (or
+        decompose yourself) before calling.
+
         Converts ``circuit`` to a Qiskit ``QuantumCircuit`` exactly once and
         builds ``param_table`` from that same object, rather than the two
         Qibo->Qiskit conversions a caller composing ``QiboParameterTable.
@@ -337,15 +341,17 @@ class QiboQMBackend(NumpyBackend):
                 :meth:`circuit_to_qua` for those).
             initial_state: A Qibo circuit to prepend, or ``None``.
             nshots: Number of shots to sample.
-            transpile: Decompose any gate not already native to this machine
-                into its native gate set before compiling, via
-                :func:`~qibo_qm_provider.backend.default_transpile.
-                default_transpile` -- e.g. a plain ``H`` on a machine with no
-                ``h`` macro. Defaults to ``True``; a decomposition emits a
-                ``UserWarning`` naming the gates involved. Pass ``False`` to
-                require an already-native circuit instead (raises
-                ``UnsupportedGateError``/whatever ``qibo_circuit_to_qiskit``
-                itself raises for a gate this machine cannot run directly).
+            transpile: When ``True`` (default), decompose any gate not
+                already native to this machine into its native gate set
+                before compiling, via :func:`~qibo_qm_provider.backend.
+                default_transpile.default_transpile` -- e.g. a plain ``H``
+                on a machine with no ``h`` macro. A decomposition emits a
+                ``UserWarning`` naming the gates involved. When ``False``,
+                skip that step only -- there is no pre-check that the
+                circuit is already native; a non-native gate still fails
+                later at compile time with the prior error path (e.g. a
+                qm_qasm ``CompilationException``), not a guaranteed
+                ``UnsupportedGateError`` from this method.
         """
         if isinstance(initial_state, QiboCircuit):
             return self.execute_circuit(initial_state + circuit, nshots=nshots, transpile=transpile)
