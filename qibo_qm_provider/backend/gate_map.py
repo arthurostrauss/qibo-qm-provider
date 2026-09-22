@@ -255,18 +255,32 @@ def enum_compatible_quam_natives(operation_names) -> list:
     )
 
 
+def _iter_quam_components(collection):
+    """Yield components from a QuAM collection (list/tuple or name->obj dict)."""
+    if not collection:
+        return
+    if isinstance(collection, dict):
+        yield from collection.values()
+    else:
+        yield from collection
+
+
 def collect_quam_macro_operation_names(machine) -> set:
-    """Collect QuAM macro names installed on ``machine``'s qubits and pairs.
+    """Collect QuAM macro names on ``machine``'s *active* qubits and pairs.
+
+    Uses ``active_qubits`` / ``active_qubit_pairs`` (not the full
+    ``qubits`` / ``qubit_pairs`` maps) so inactive components do not
+    contribute macros to the shared natives set.
 
     Used by ``QiboQMPlatformBackend.natives`` when a live ``machine`` is
     available, so both backends derive natives from the same QuAM-macro
     source rather than from qibolab's wider compiler-rule list.
     """
     names: set = set()
-    for qubit in (getattr(machine, "qubits", None) or {}).values():
+    for qubit in _iter_quam_components(getattr(machine, "active_qubits", None)):
         macros = getattr(qubit, "macros", None) or {}
         names.update(macros)
-    for pair in (getattr(machine, "qubit_pairs", None) or {}).values():
+    for pair in _iter_quam_components(getattr(machine, "active_qubit_pairs", None)):
         macros = getattr(pair, "macros", None) or {}
         names.update(macros)
     return names
