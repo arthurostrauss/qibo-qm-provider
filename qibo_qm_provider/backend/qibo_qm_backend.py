@@ -423,7 +423,7 @@ class QiboQMBackend(NumpyBackend):
         ``Result`` (``experiment_index``).
 
         Args:
-            circuit: See :meth:`execute_circuit`; applied identically to
+            circuits: See :meth:`execute_circuit`; applied identically to every circuit in the batch.
                 every circuit in ``circuits``.
             initial_state: A Qibo circuit prepended to every circuit in
                 ``circuits``, or ``None``.
