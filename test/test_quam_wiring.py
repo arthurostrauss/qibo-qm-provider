@@ -116,19 +116,14 @@ def test_flux_offset_comes_from_joint_offset_not_port(mw_fem_machine):
     assert isinstance(configs["mw0/flux"], OpxOutputConfig)
 
 
-def test_feedforward_and_exponential_together_warns_only_on_affected_qubit(mw_fem_machine):
-    """mw0's flux port has both exponential_filter and feedforward_filter
-    (the combination that risks double-applying the exponential correction,
-    see quam_wiring's module docstring); mw1's has neither -- the warning
-    must fire once, naming mw0, and not at all for mw1."""
+def test_feedforward_and_exponential_together_does_not_warn(mw_fem_machine):
+    """Having both feedforward_filter and exponential_filter should not emit
+    any stale double-apply warning."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         build_qm_wiring(mw_fem_machine)
 
-    double_apply_warnings = [w for w in caught if "double-apply" in str(w.message)]
-    assert len(double_apply_warnings) == 1
-    assert "'mw0'" in str(double_apply_warnings[0].message)
-    assert not any("'mw1'" in str(w.message) and "double-apply" in str(w.message) for w in caught)
+    assert not any("double-apply" in str(w.message) for w in caught)
 
 
 def test_delay_and_crosstalk_loss_warns(mw_fem_machine):
