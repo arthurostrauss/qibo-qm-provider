@@ -92,6 +92,53 @@ class QiboQMBackend(NumpyBackend):
         """
         return self._qiskit_backend
 
+    @classmethod
+    def from_iqcc(
+        cls,
+        backend_name: str,
+        *,
+        quam_state_folder_path: Optional[str] = None,
+        quam_cls: Optional[type[QuamRoot]] = None,
+        api_token: Optional[str] = None,
+    ) -> "QiboQMBackend":
+        """Fetch ``backend_name``'s latest state from IQCC and build a backend.
+
+        No ``$QIBOLAB_PLATFORMS`` folder registration required -- this is
+        the native-Python entrypoint, going through the same
+        ``_create_iqcc_with_machine`` a registered
+        ``qibo-qm-iqcc-<backend_name>`` folder's ``platform.py`` would call.
+        """
+        from qiskit_qm_provider.providers import IQCCProvider
+        from qiskit_qm_provider.quam_macros.superconducting import add_basic_macros
+        provider = IQCCProvider(api_token=api_token)
+        machine = provider.get_machine(backend_name, quam_state_folder_path=quam_state_folder_path, quam_cls=quam_cls)
+        add_basic_macros(machine)
+        return cls(machine=machine)
+    
+    @classmethod
+    def from_local(
+        cls,
+        state_path: str,
+        *,
+        quam_class: Optional[str] = None,
+    ) -> "QiboQMBackend":
+        """Load an already-existing local QuAM state and build a backend.
+
+        No ``$QIBOLAB_PLATFORMS`` folder registration required -- the
+        native-Python entrypoint counterpart to ``from_iqcc``.
+        """
+        from qiskit_qm_provider.quam_macros.superconducting import add_basic_macros
+        from qiskit_qm_provider.providers import QMProvider
+        provider = QMProvider(state_folder_path=state_path, quam_cls=quam_class)
+        machine = provider.get_machine()
+        add_basic_macros(machine)
+        def init_macro(*args, **kwargs):
+            machine.initialize_qpu(*args, **kwargs)
+            if hasattr(machine, "apply_qdac_offsets"):
+                machine.apply_qdac_offsets()
+        return cls(machine=machine, init_macro=init_macro)
+        
+
     # ------------------------------------------------------------------
     # Qibo Backend contract
     # ------------------------------------------------------------------
