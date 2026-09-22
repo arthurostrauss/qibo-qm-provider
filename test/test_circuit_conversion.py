@@ -154,6 +154,72 @@ def test_wire_names_unknown_qubit_raises_value_error():
         qibo_circuit_to_qiskit(circuit, qubit_dict={"q0": 0})
 
 
+def test_explicit_wire_names_uses_a_pinned_layout_not_target_translation():
+    """The explicit-wire_names path goes through a real qiskit.transpiler.
+    Layout + qiskit.compiler.transpile() (issue #7), not the old hand-rolled
+    QuantumCircuit.compose() remap -- but deliberately with no backend/target
+    involved, so gate content is untouched (only the physical index of each
+    qubit changes)."""
+    circuit = Circuit(2, wire_names=["q1", "q0"])
+    circuit.add(gates.CZ(0, 1))
+
+    qc = qibo_circuit_to_qiskit(circuit, qubit_dict={"q0": 0, "q1": 1})
+
+    assert [instr.operation.name for instr in qc.data] == ["cz"]
+    cz_instr = next(instr for instr in qc.data if instr.operation.name == "cz")
+    # logical (0, 1) -> physical (qubit_dict["q1"], qubit_dict["q0"]) = (1, 0)
+    assert [qc.find_bit(q).index for q in cz_instr.qubits] == [1, 0]
+
+
+# --------------------------------------------------------------------------- #
+# backend-targeted automatic layout (issue #7)
+#
+# circuit.wire_names left at its default with a real backend given: rather
+# than staying a no-op, qibo_circuit_to_qiskit now runs an ordinary
+# qiskit.compiler.transpile(qc, backend=...) against the backend's real
+# Target, so Qiskit's own preset pass manager can place/route/correct the
+# circuit automatically -- see QiboQMBackend.execute_circuit's docstring for
+# the full rationale (and why it's gated behind transpile=True there).
+# --------------------------------------------------------------------------- #
+
+
+def test_backend_none_default_wire_names_is_still_a_no_op(add_basic_macros_installed):
+    """No backend given -> unchanged no-op, regardless of qubit_dict --
+    matches every caller with no machine to transpile against."""
+    from qibo_qm_provider.backend.qibo_qm_backend import QiboQMBackend
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    circuit = Circuit(2)
+    circuit.add(gates.CZ(1, 0))
+
+    qc = qibo_circuit_to_qiskit(circuit, qubit_dict=backend.qiskit_backend.qubit_dict)
+
+    cz_instr = next(instr for instr in qc.data if instr.operation.name == "cz")
+    assert [qc.find_bit(q).index for q in cz_instr.qubits] == [1, 0]
+
+
+def test_backend_given_default_wire_names_auto_places_against_real_target(add_basic_macros_installed):
+    """With a real backend and default wire_names, the resulting circuit is
+    placed/corrected against the backend's actual Target -- here, the only
+    registered "q0-q1" direction is (0, 1), so a CZ(1, 0) gets its qubit
+    order corrected automatically (CZ is unitarily symmetric)."""
+    from qibo_qm_provider.backend.qibo_qm_backend import QiboQMBackend
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    assert backend.qiskit_backend.qubit_pair_dict["q0-q1"] == (0, 1)
+    circuit = Circuit(2)
+    circuit.add(gates.CZ(1, 0))
+
+    qc = qibo_circuit_to_qiskit(
+        circuit,
+        qubit_dict=backend.qiskit_backend.qubit_dict,
+        backend=backend.qiskit_backend,
+    )
+
+    cz_instr = next(instr for instr in qc.data if instr.operation.name == "cz")
+    assert [qc.find_bit(q).index for q in cz_instr.qubits] == [0, 1]
+
+
 # --------------------------------------------------------------------------- #
 # validate_two_qubit_connectivity
 #

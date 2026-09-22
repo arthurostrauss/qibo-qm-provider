@@ -238,9 +238,41 @@ def test_circuit_to_qua_rejects_reversed_cz_direction(add_basic_macros_installed
         backend.circuit_to_qua(circuit)
 
 
-def test_execute_circuit_rejects_reversed_cz_direction(add_basic_macros_installed):
-    """The same check must fire before execute_circuit ever attempts to
-    submit a job (no live QM connection is set up in this fixture)."""
+def test_execute_circuit_default_layout_auto_corrects_reversed_cz_direction(add_basic_macros_installed):
+    """With ``circuit.wire_names`` left unset (no explicit placement
+    requested), ``execute_circuit``'s default (``transpile=True``) automatic
+    layout step now runs a real ``qiskit.compiler.transpile(qc,
+    backend=...)`` against the wrapped machine's actual ``Target`` -- since
+    ``CZ`` is unitarily symmetric, Qiskit's own transpiler corrects the
+    gate's qubit order to the one direction that is actually registered,
+    rather than requiring the caller to have written it correctly by hand
+    (the old "arbel" failure mode this package used to just reject)."""
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    assert backend.qiskit_backend.qubit_pair_dict["q0-q1"] == (0, 1)
+
+    circuit = Circuit(2)
+    circuit.add(gates.CZ(1, 0))
+    circuit.add(gates.M(0, 1))
+
+    with (
+        patch.object(backend.qiskit_backend, "run") as mock_run,
+        patch("qibo_qm_provider.backend.qibo_qm_backend.translate_measurements"),
+    ):
+        backend.execute_circuit(circuit)  # must not raise
+
+    (qc,), _ = mock_run.call_args
+    cz_instr = next(instr for instr in qc.data if instr.operation.name == "cz")
+    assert [qc.find_bit(q).index for q in cz_instr.qubits] == [0, 1]
+
+
+def test_execute_circuit_transpile_false_leaves_reversed_cz_direction_unfixed(add_basic_macros_installed):
+    """``transpile=False`` opts out of *all* automatic behaviour, not just
+    Qibo-level gate decomposition -- including the new automatic-layout
+    step above, so a caller who wants full manual control still gets
+    exactly that (the same "compile it verbatim, fail later if it's wrong"
+    contract this parameter has always documented)."""
     from qibo import Circuit, gates
 
     backend = QiboQMBackend(add_basic_macros_installed)
@@ -250,7 +282,7 @@ def test_execute_circuit_rejects_reversed_cz_direction(add_basic_macros_installe
     circuit.add(gates.M(0, 1))
 
     with pytest.raises(UnsupportedConnectivityError):
-        backend.execute_circuit(circuit)
+        backend.execute_circuit(circuit, transpile=False)
 
 
 def test_circuit_to_qua_wire_names_routes_logical_qubits_to_the_calibrated_direction(add_basic_macros_installed):
@@ -347,7 +379,14 @@ def test_execute_circuit_already_native_gate_is_unaffected_by_transpile(add_basi
             warnings.simplefilter("always")
             backend.execute_circuit(circuit)
 
-    assert not caught
+    # Scoped to UserWarning -- this package's own decomposition-notice
+    # channel (see default_transpile.default_transpile) -- rather than
+    # every warning of any kind, since the automatic layout step now calls
+    # qiskit.compiler.transpile(), which can trigger unrelated third-party
+    # DeprecationWarnings (e.g. lazy plugin discovery) with no bearing on
+    # whether *this* already-native, already-correctly-directed circuit was
+    # left alone.
+    assert not [w for w in caught if issubclass(w.category, UserWarning)]
     (qc,), _ = mock_run.call_args
     assert [instr.operation.name for instr in qc.data] == ["cz", "measure", "measure"]
 

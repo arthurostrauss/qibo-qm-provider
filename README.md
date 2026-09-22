@@ -201,21 +201,50 @@ with program() as prog:
 Both `QiboQMBackend` and `QiboQMPlatformBackend` run a default **gate**
 decomposition step in `execute_circuit` (`transpile=True`; opt out with
 `transpile=False`) — e.g. a plain `H` is rewritten into the machine's
-native set before compile. That step never does **placement or routing**:
-a circuit's qubit index `i` still addresses whichever QuAM / platform qubit
-sits at position `i` (or the corresponding platform qubit list), unless you
-set `Circuit(n, wire_names=[...])` to physical qubit names explicitly.
+native set before compile.
+
+**Explicit placement** (`Circuit(n, wire_names=[...])` set to physical qubit
+names) is always honoured verbatim on both backends: logical qubit `i`
+addresses whichever physical qubit `wire_names[i]` names, regardless of
+`transpile`. On `QiboQMBackend` this goes through a real
+`qiskit.transpiler.Layout` + `qiskit.compiler.transpile()` (issue #7) rather
+than a hand-rolled index remap, but deliberately with no backend/`Target`
+involved, so nothing about the requested assignment — including a two-qubit
+gate's qubit order — is reinterpreted.
+
+**Left unset**, the two backends now differ:
+
+- `QiboQMPlatformBackend` (and plain `QiboQMBackend` with `transpile=False`)
+  do no placement at all: a circuit's qubit index `i` addresses whichever
+  QuAM/platform qubit sits at position `i`, exactly as before. A two-qubit
+  gate written in the physically uncalibrated order fails, either as
+  `UnsupportedConnectivityError` (`QiboQMBackend`) or an opaque compiler
+  error (`QiboQMPlatformBackend`, which has no equivalent pre-check).
+- `QiboQMBackend` with `transpile=True` (the default) now runs an ordinary
+  `qiskit.compiler.transpile(qc, backend=self.qiskit_backend,
+  optimization_level=0)` against the wrapped machine's real `Target` —
+  Qiskit's own preset pass manager picks layout/routing/gate-direction
+  automatically. Since e.g. `CZ` is unitarily symmetric, a two-qubit gate
+  written in the physically uncalibrated order is silently **corrected**
+  rather than rejected. `optimization_level=0` is deliberate: a higher
+  level would also apply passes like `RemoveDiagonalGatesBeforeMeasure`,
+  which could drop a gate immediately preceding a same-basis measurement of
+  its own qubits — mathematically output-equivalent, but not the pulse
+  sequence you actually asked to run on hardware.
 
 `circuit_to_qua` / `circuit_to_qua_macro` and Platform `execute_circuits`
-do **not** auto-decompose; they expect an already-native circuit (or will
-fail at compile time the old way). See #8 for transpile parity on those
-APIs.
+do **not** get any of the above automatically — explicit `wire_names` is
+still honoured (same `Layout`-based resolution), but the default/unset case
+stays a plain no-op and gates are never auto-decomposed; both expect an
+already-native, already-placed circuit (or will fail at compile time the
+old way). See #8 for transpile parity on those APIs.
 
-Many QM two-qubit natives (e.g. a flux-tunable `CZ`) are also physically
+Many QM two-qubit natives (e.g. a flux-tunable `CZ`) are physically
 **asymmetric** — the flux pulse only plays on one qubit of the pair — so
 `CZ(a, b)` and `CZ(b, a)` are not interchangeable even though Qibo treats
-the gate as order-independent. Writing the wrong direction raises a clear
-`UnsupportedConnectivityError` naming the direction that is actually
+the gate as order-independent. Writing the wrong direction with an explicit
+`wire_names`, or anywhere `transpile=False` is in effect, still raises a
+clear `UnsupportedConnectivityError` naming the direction that is actually
 installed, rather than an opaque compiler failure.
 
 ## Status note — 2026-09-03

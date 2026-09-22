@@ -361,22 +361,53 @@ class QiboQMBackend(NumpyBackend):
     ) -> MeasurementOutcomes:
         """Execute ``circuit`` on the wrapped QM machine.
 
+        Physical qubit placement is driven entirely by ``circuit.wire_names``
+        (see :func:`~qibo_qm_provider.backend.circuit_conversion.
+        qibo_circuit_to_qiskit`):
+
+        * **Explicit** (``Circuit(n, wire_names=[...])`` set to physical
+          qubit names): honoured verbatim -- resolved through
+          ``self.qiskit_backend.qubit_dict`` into a
+          :class:`~qiskit.transpiler.Layout`, applied via
+          :func:`qiskit.compiler.transpile` with no target/basis involved,
+          so nothing about the requested assignment (including a two-qubit
+          gate's qubit order) is reinterpreted. A wrong direction still
+          raises :class:`~qibo_qm_provider.exceptions.
+          UnsupportedConnectivityError` exactly as before.
+        * **Left unset**, with ``transpile=True`` (default): an ordinary
+          ``transpile(qc, backend=self.qiskit_backend, optimization_level=0)``
+          runs against the wrapped machine's real ``Target`` -- Qiskit's own
+          preset pass manager picks layout/routing/gate-direction
+          automatically, so e.g. a two-qubit gate written in the physically
+          uncalibrated order is silently corrected (``CZ`` is unitarily
+          symmetric) rather than rejected. This is a real, if narrow,
+          behaviour change from before this existed -- a circuit that used
+          to fail with ``UnsupportedConnectivityError`` may now silently
+          succeed with its gate order corrected.
+
         Args:
             circuit: A concrete Qibo circuit (no symbolic parameters -- use
                 :meth:`circuit_to_qua` for those).
             initial_state: A Qibo circuit to prepend, or ``None``.
             nshots: Number of shots to sample.
-            transpile: When ``True`` (default), decompose any gate not
-                already native to this machine into its native gate set
-                before compiling, via :func:`~qibo_qm_provider.backend.
-                default_transpile.default_transpile` -- e.g. a plain ``H``
-                on a machine with no ``h`` macro. A decomposition emits a
-                ``UserWarning`` naming the gates involved. When ``False``,
-                skip that step only -- there is no pre-check that the
-                circuit is already native; a non-native gate still fails
-                later at compile time with the prior error path (e.g. a
-                qm_qasm ``CompilationException``), not a guaranteed
-                ``UnsupportedGateError`` from this method.
+            transpile: When ``True`` (default): (1) decompose any gate not
+                already native to this machine into its native gate set,
+                via :func:`~qibo_qm_provider.backend.default_transpile.
+                default_transpile` -- e.g. a plain ``H`` on a machine with
+                no ``h`` macro (emits a ``UserWarning`` naming the gates
+                decomposed); and (2), only when ``circuit.wire_names`` is
+                left unset, run the automatic backend-targeted layout step
+                described above. When ``False``, skip *both* -- the fully
+                manual contract this parameter has always had: no pre-check
+                that the circuit is already native or already placed: a
+                non-native gate or an uncalibrated two-qubit direction still
+                fails, but via the prior error path (e.g. a qm_qasm
+                ``CompilationException``, not a guaranteed
+                ``UnsupportedGateError``/``UnsupportedConnectivityError``
+                from this method) -- unless ``circuit.wire_names`` is
+                explicit, which is still honoured regardless of
+                ``transpile`` (it is a placement directive from the caller,
+                not something this flag governs).
         """
         if isinstance(initial_state, QiboCircuit):
             return self.execute_circuit(initial_state + circuit, nshots=nshots, transpile=transpile)
@@ -395,7 +426,11 @@ class QiboQMBackend(NumpyBackend):
             circuit = self._default_transpile(circuit)
 
         qubit_dict = self._qiskit_backend.qubit_dict
-        qc = qibo_circuit_to_qiskit(circuit, qubit_dict=qubit_dict)
+        qc = qibo_circuit_to_qiskit(
+            circuit,
+            qubit_dict=qubit_dict,
+            backend=self._qiskit_backend if transpile else None,
+        )
         validate_two_qubit_connectivity(qc, self._qiskit_backend.qubit_pair_dict, qubit_dict)
         job = self._qiskit_backend.run(qc, shots=nshots, memory=True)
         result = job.result()
