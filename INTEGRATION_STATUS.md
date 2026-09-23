@@ -9,6 +9,7 @@ called out explicitly rather than by silently editing history.
 
 | Date | Slice | Section |
 |---|---|---|
+| 2026-09-22 | `QiboQMBackend`: explicit `wire_names` now resolved via a real `qiskit.transpiler.Layout` + `transpile()`; unset `wire_names` gets an automatic, backend-targeted `transpile()` by default. Closes #7 for this backend; `QiboQMPlatformBackend` deliberately left unchanged | [Layout-based placement and automatic default-layout transpile for `QiboQMBackend`](#layout-based-placement-and-automatic-default-layout-transpile-for-qiboqmbackend-2026-09-22) |
 | 2026-09-06 | `scaffold.py`: writes the `platform.py`+`quam_source.json` folder pair `$QIBOLAB_PLATFORMS` name resolution needs; CLI added | [Platform-folder scaffolding: `$QIBOLAB_PLATFORMS` resolution closed](#platform-folder-scaffolding-qibolab_platforms-resolution-closed-2026-09-06) |
 | 2026-09-03 | `IQCCQmController`: `QmController` subclass executing through IQCC's cloud manager, dispatched automatically from the machine's own `network` config | [`IQCCQmController`: cloud execution for `QiboQMPlatformBackend`](#iqccqmcontroller-cloud-execution-for-qiboqmplatformbackend-2026-09-03) |
 | 2026-09-03 | Architecture audit against `architecture_preliminary_insights.md`; README rewritten with the two-path reuse boundary and code examples | [Architecture audit and README rewrite](#architecture-audit-and-readme-rewrite-2026-09-03) |
@@ -32,6 +33,83 @@ Companion documents: `symbolic_circuit_lowering.md` (the 2026-08-26 path, in
 depth, plus the findings and compromises behind it), `slice2_plan.md` (what is
 next for it), `qibo_backend_vs_qibolab_platform.md`,
 `qibolab_platform_from_quam_plan.md`, `qibocal_multi_qubit_handling.md`.
+
+## Layout-based placement and automatic default-layout transpile for `QiboQMBackend` (2026-09-22)
+
+Closes #7 for `QiboQMBackend` (deliberately not `QiboQMPlatformBackend` --
+see below). Prior art: the 2026-08-27 section below fixed explicit
+`wire_names` resolution via a hand-rolled `QuantumCircuit.compose()` remap,
+and left automatic placement as future work (issue #7 itself, filed the
+same day, as a follow-up to #4/PR #5).
+
+**What changed, in `circuit_conversion.py`'s `_resolve_wire_names`
+(unchanged name, entirely rewritten body) and `qibo_circuit_to_qiskit`
+(new `backend` parameter):**
+
+- **Explicit `wire_names`**: each logical index is resolved through
+  `qubit_dict` to a physical index exactly as before, but the physical
+  remap itself now goes through a real `qiskit.transpiler.Layout.from_intlist`
+  + `qiskit.compiler.transpile(qc, initial_layout=layout, optimization_level=0)`
+  -- deliberately with **no** `backend`/`Target` argument, so the request is
+  honoured verbatim: no gate-direction "correction", no basis translation.
+  `validate_two_qubit_connectivity` (unchanged) remains the one place a
+  direction mismatch is judged for this path.
+- **Unset `wire_names`, with a `backend` given**: `qibo_circuit_to_qiskit`
+  now runs `transpile(qc, backend=backend, optimization_level=0)` -- an
+  ordinary, target-aware Qiskit transpilation, letting Qiskit's own preset
+  pass manager pick layout/routing/gate-direction automatically against the
+  backend's real `Target`.
+- **Unset `wire_names`, no `backend`**: unchanged no-op, for every caller
+  with nothing to transpile against (plain `qibo_circuit_to_qiskit(circuit)`,
+  no machine).
+
+**Wired into `QiboQMBackend`**: `circuit_to_qua` always passes `backend=None`
+(it already documents itself as fully manual -- no automatic anything, only
+explicit `wire_names` benefits from the `Layout` upgrade). `execute_circuit`
+passes `backend=self.qiskit_backend if transpile else None` -- i.e. the
+existing `transpile` flag now also gates the new automatic-layout step, not
+just gate decomposition, so `transpile=False` keeps its original, fully
+documented meaning ("nothing automatic happens, a bad circuit fails later at
+compile time") rather than picking up a new automatic behaviour it never
+opted into.
+
+**Real, deliberate behaviour change**: with `transpile=True` (the default)
+and no explicit `wire_names`, a two-qubit gate written in the physically
+uncalibrated direction -- the exact "arbel" `CZ(0,1)`-vs-`(1,0)` failure mode
+the 2026-08-27 section root-caused -- is now silently **corrected** rather
+than rejected with `UnsupportedConnectivityError`, since e.g. `CZ` is
+unitarily symmetric and Qiskit's `Target`-aware transpiler treats the
+registered single direction as the only valid placement. Verified directly:
+`test_execute_circuit_default_layout_auto_corrects_reversed_cz_direction`
+(new) replaces the old `test_execute_circuit_rejects_reversed_cz_direction`;
+a new `test_execute_circuit_transpile_false_leaves_reversed_cz_direction_unfixed`
+locks in that `transpile=False` still rejects it, preserving the original
+regression coverage for the fully-manual contract.
+
+**`optimization_level=0` is deliberate, not a placeholder**: verified
+empirically (a throwaway probe script, not committed) that Qiskit's default
+optimization level applies `RemoveDiagonalGatesBeforeMeasure` and similar
+passes, which silently dropped a `CZ` immediately preceding a Z-basis
+measurement of both its qubits entirely -- mathematically output-equivalent,
+but not the pulse sequence actually requested. Also verified that a
+layout+routing-only `StagedPassManager` (skipping the `translation` stage
+entirely) leaves both gate content *and* gate direction untouched --
+direction correction lives in the `translation` stage, not `routing`, so
+there is no way to get automatic direction-fixing without also accepting
+that `transpile()` may translate/rewrite gate content on this path (hence
+gating the whole automatic step behind `transpile=True`, rather than trying
+to separate "placement-only" from "gate-decomposition" at the Qiskit level).
+
+**Deliberately not touched**: `QiboQMPlatformBackend` keeps its existing,
+qibolab-native `wire_names` contract unchanged (no automatic placement) --
+it never builds a Qiskit circuit at all, so this Layout/`transpile()`
+mechanism does not apply; qibolab's own `Compiler.get_sequence` already
+reads `wire_names[q] for q in gate.qubits` directly, and qibolab itself has
+no placement/routing machinery to delegate to either (confirmed: no
+`Placer`/`Router`/`transpiler` reference anywhere in qibolab's source).
+"Reuniting" the two backends here means both honour explicit `wire_names`
+faithfully, not that they share one placement code path -- one is
+genuinely Qiskit-based, the other genuinely is not.
 
 ## Platform-folder scaffolding: `$QIBOLAB_PLATFORMS` resolution closed (2026-09-06)
 

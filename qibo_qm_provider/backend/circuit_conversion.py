@@ -44,6 +44,9 @@ from typing import Dict, Optional
 
 from qibo.models import Circuit as QiboCircuit
 from qiskit.circuit import ClassicalRegister, Parameter, QuantumCircuit
+from qiskit.compiler import transpile
+from qiskit.providers import BackendV2
+from qiskit.transpiler import Layout
 
 from qibo_qm_provider.exceptions import UnsupportedConnectivityError, UnsupportedGateError
 
@@ -176,34 +179,74 @@ def build_qiskit_circuit_directly(circuit: QiboCircuit) -> QuantumCircuit:
 
 
 def _resolve_wire_names(
-    circuit: QiboCircuit, qc: QuantumCircuit, qubit_dict: Optional[Dict[str, int]]
+    circuit: QiboCircuit,
+    qc: QuantumCircuit,
+    qubit_dict: Optional[Dict[str, int]],
+    backend: Optional[BackendV2] = None,
 ) -> QuantumCircuit:
-    """Remap ``qc``'s qubit indices from ``circuit.wire_names`` to the
-    physical Qiskit indices ``qubit_dict`` (a QuAM qubit name -> Qiskit index
-    mapping, e.g. ``QMBackend.qubit_dict``) assigns them.
+    """Place ``qc`` onto physical qubits, via a real Qiskit ``Layout`` and
+    :func:`qiskit.compiler.transpile` -- not a hand-rolled index remap.
 
-    A no-op in the common case: ``circuit.wire_names`` defaults to plain
-    ``list(range(nqubits))`` (Qibo's own default, per
-    ``qibo.models.circuit.Circuit.wire_names``'s getter -- it is never
-    consulted by ``Circuit.to_qasm()`` or by this module otherwise), and
-    ``qubit_dict`` is ``None`` unless a caller with an actual machine (i.e.
-    ``QiboQMBackend``) passes one in. Either condition alone is enough to
-    keep today's behaviour (Qibo index ``i`` addresses Qiskit index ``i``
-    verbatim) exactly as it was before this existed.
+    Two cases, both driven by ``circuit.wire_names`` (Qibo's own logical
+    index -> physical-qubit-name channel; defaults to plain
+    ``list(range(nqubits))``, per ``qibo.models.circuit.Circuit.wire_names``'s
+    getter):
 
-    When ``circuit.wire_names`` *is* set to physical qubit names, each
-    logical index ``i`` is remapped so that the gate originally written for
-    Qibo qubit ``i`` now addresses Qiskit qubit ``qubit_dict[wire_names[i]]``
-    -- i.e. the machine's own qubit, wherever ``QMBackend`` put it in its
-    ``Target``. This is the same contract ``qibolab``'s own compiler already
-    honours for ``QiboQMPlatformBackend`` (``Compiler.get_sequence`` reads
-    ``wire_names[q] for q in gate.qubits``, order preserving) -- this
-    package's OpenQASM/``qm_qasm`` path previously had no equivalent at all.
+    * **Explicit** (``wire_names`` set to physical qubit names): resolve each
+      name through ``qubit_dict`` (a QuAM qubit name -> Qiskit index mapping,
+      e.g. ``QMBackend.qubit_dict``) to get the physical index for every
+      logical position, build a :class:`~qiskit.transpiler.Layout` from it
+      (``Layout.from_intlist``), and transpile ``qc`` against *only* that
+      pinned layout -- deliberately **not** against ``backend``/its
+      ``Target``, so the requested physical assignment is honoured verbatim,
+      with no gate-direction "fix-up" or rerouting Qiskit's target-aware
+      passes might otherwise apply (a symmetric-looking gate like ``CZ`` can
+      still be physically asymmetric on this hardware -- see
+      :func:`validate_two_qubit_connectivity`, called by every caller of this
+      function right after, which is the one place direction is judged).
+      This is the same contract ``qibolab``'s own compiler already honours
+      for ``QiboQMPlatformBackend`` (``Compiler.get_sequence`` reads
+      ``wire_names[q] for q in gate.qubits``, order preserving).
+    * **Default/unset**, with a ``backend`` given: run a full, ordinary
+      ``transpile(qc, backend=backend)`` -- Qiskit's own preset pass manager
+      picks layout and routing against the backend's real ``Target`` (which
+      already reflects this machine's directional two-qubit connectivity),
+      so a circuit whose plain Qibo indices don't already happen to line up
+      with a valid physical assignment can still execute, without the
+      caller having to place it by hand.
+    * **Default/unset**, no ``backend``: unchanged, a no-op -- matches
+      behaviour from before ``wire_names``/placement support existed, for
+      every caller with no machine to transpile against (e.g. plain
+      ``qibo_circuit_to_qiskit(circuit)``).
+
+    Args:
+        circuit: The source Qibo circuit (read only for ``.wire_names`` and
+            ``.nqubits``).
+        qc: The already gate-converted Qiskit circuit to place.
+        qubit_dict: Required to resolve an explicit ``wire_names`` list;
+            ignored otherwise.
+        backend: The target ``BackendV2`` to transpile the default/unset
+            case against. Optional -- with none given, that case is a no-op.
+
+    Returns:
+        The placed ``QuantumCircuit``, with its qubit indices now physical.
     """
-    if qubit_dict is None:
-        return qc
     wire_names = circuit.wire_names
-    if list(wire_names) == list(range(circuit.nqubits)):
+    is_default = list(wire_names) == list(range(circuit.nqubits))
+
+    if is_default:
+        if backend is None:
+            return qc
+        # optimization_level=0 deliberately: layout/routing/translation
+        # still run (needed for both automatic placement and direction
+        # correction -- see this function's docstring), but a higher level
+        # also enables passes like RemoveDiagonalGatesBeforeMeasure, which
+        # would e.g. drop a CZ immediately preceding a Z-basis measurement
+        # of both its qubits -- mathematically output-equivalent, but not
+        # the pulse sequence the caller actually asked to run on hardware.
+        return transpile(qc, backend=backend, optimization_level=0)
+
+    if qubit_dict is None:
         return qc
     try:
         mapping = [qubit_dict[name] for name in wire_names]
@@ -212,11 +255,13 @@ def _resolve_wire_names(
             f"circuit.wire_names names an unknown qubit {exc.args[0]!r}. "
             f"Known qubits on this machine: {sorted(qubit_dict)}."
         ) from exc
-    remapped = QuantumCircuit(qc.num_qubits)
-    for creg in qc.cregs:
-        remapped.add_register(creg)
-    remapped.compose(qc, qubits=mapping, clbits=list(range(qc.num_clbits)), inplace=True)
-    return remapped
+    layout = Layout.from_intlist(mapping, qc.qregs[0])
+    # No backend/target here (see docstring): this is a pinned placement,
+    # not a target-aware transpile, so it must not translate gates or
+    # "correct" a two-qubit gate's direction -- validate_two_qubit_
+    # connectivity (called by every caller of this function) is the one
+    # place a direction mismatch is judged.
+    return transpile(qc, initial_layout=layout, optimization_level=0)
 
 
 def validate_two_qubit_connectivity(
@@ -278,14 +323,18 @@ def validate_two_qubit_connectivity(
 def qibo_circuit_to_qiskit(
     circuit: QiboCircuit,
     qubit_dict: Optional[Dict[str, int]] = None,
+    backend: Optional[BackendV2] = None,
 ) -> QuantumCircuit:
-    """Convert a Qibo circuit to a Qiskit ``QuantumCircuit``.
+    """Convert a Qibo circuit to a Qiskit ``QuantumCircuit``, placed on
+    physical qubits.
 
     Thin wrapper around :func:`build_qiskit_circuit_directly` that also
-    resolves ``circuit.wire_names`` against ``qubit_dict`` if both are given
-    -- see :func:`_resolve_wire_names`. A caller with no machine
-    (``qubit_dict=None``, the default) gets Qibo qubit index ``i`` mapped to
-    Qiskit qubit index ``i``, unconditionally.
+    places the result according to ``circuit.wire_names`` -- see
+    :func:`_resolve_wire_names` for the full contract (explicit
+    ``wire_names`` -> a pinned :class:`~qiskit.transpiler.Layout`; default
+    ``wire_names`` + a ``backend`` -> an ordinary backend-targeted
+    ``transpile()`` picks layout/routing automatically; neither -> a no-op,
+    matching behaviour before ``wire_names``/placement support existed).
 
     Args:
         circuit: A Qibo circuit, symbolic or concrete. ``qibo.gates.Align``
@@ -293,8 +342,11 @@ def qibo_circuit_to_qiskit(
         qubit_dict: A QuAM qubit name -> Qiskit index mapping (e.g.
             ``QiboQMBackend.qiskit_backend.qubit_dict``), used to resolve
             ``circuit.wire_names`` if it has been set to physical qubit
-            names. ``None`` (the default) disables this entirely, matching
-            behaviour before ``wire_names`` support existed.
+            names. ``None`` (the default) disables this entirely.
+        backend: The ``BackendV2`` to transpile against when
+            ``circuit.wire_names`` is left at its default -- see
+            :func:`_resolve_wire_names`. ``None`` (the default) disables
+            this entirely, so an unset ``wire_names`` stays a no-op.
 
     Returns:
         The equivalent Qiskit ``QuantumCircuit``, with one classical register
@@ -311,4 +363,4 @@ def qibo_circuit_to_qiskit(
             ``qubit_dict``.
     """
     qc = build_qiskit_circuit_directly(circuit)
-    return _resolve_wire_names(circuit, qc, qubit_dict)
+    return _resolve_wire_names(circuit, qc, qubit_dict, backend)
