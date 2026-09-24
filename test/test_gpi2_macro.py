@@ -162,5 +162,5 @@ def test_default_transpile_rejects_decomposition_into_non_native_gates(add_basic
 
     circuit = Circuit(1)
     circuit.add(gates.H(0))
-    with pytest.raises(UnsupportedGateError, match=r"H .*\['Z'\]"):
+    with pytest.raises(UnsupportedGateError, match=r"H .*z is not a native gate"):
         backend._default_transpile(circuit)
