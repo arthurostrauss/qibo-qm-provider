@@ -6,6 +6,7 @@ from qiskit.circuit import QuantumCircuit
 
 from qibo_qm_provider.backend.circuit_conversion import (
     qibo_circuit_to_qiskit,
+    normalize_symmetric_two_qubit_directions,
     validate_two_qubit_connectivity,
 )
 from qibo_qm_provider.exceptions import UnsupportedConnectivityError, UnsupportedGateError
@@ -271,3 +272,54 @@ def test_validate_two_qubit_connectivity_ignores_measure_and_single_qubit_gates(
     qc.measure(1, 1)
 
     validate_two_qubit_connectivity(qc, qubit_pair_dict={})  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# normalize_symmetric_two_qubit_directions
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("gate", ["cz", "iswap"])
+def test_normalize_reorders_reversed_symmetric_gate(gate):
+    from qiskit.quantum_info import Operator
+
+    qc = QuantumCircuit(2)
+    qc.h(0)
+    getattr(qc, gate)(1, 0)
+
+    out = normalize_symmetric_two_qubit_directions(qc, {"q0-q1": (0, 1)})
+
+    assert [out.find_bit(q).index for q in out.data[1].qubits] == [0, 1]
+    assert Operator(out).equiv(Operator(qc))
+    validate_two_qubit_connectivity(out, qubit_pair_dict={"q0-q1": (0, 1)})  # must not raise
+    # the input circuit is left untouched
+    assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [1, 0]
+
+
+def test_normalize_leaves_asymmetric_gate_for_validation():
+    qc = QuantumCircuit(2)
+    qc.cx(1, 0)
+
+    out = normalize_symmetric_two_qubit_directions(qc, {"q0-q1": (0, 1)})
+
+    assert out is qc
+    with pytest.raises(UnsupportedConnectivityError, match=r"cx"):
+        validate_two_qubit_connectivity(out, qubit_pair_dict={"q0-q1": (0, 1)})
+
+
+def test_normalize_leaves_registered_and_unconnected_pairs_alone():
+    qc = QuantumCircuit(3)
+    qc.cz(0, 1)
+    qc.cz(0, 2)
+
+    assert normalize_symmetric_two_qubit_directions(qc, {"q0-q1": (0, 1)}) is qc
+
+
+def test_normalize_keeps_both_directions_when_both_are_registered():
+    """Two separately calibrated directions: each written order already
+    matches its own macro, nothing to reorder."""
+    qc = QuantumCircuit(2)
+    qc.cz(1, 0)
+
+    pairs = {"q0-q1": (0, 1), "q1-q0": (1, 0)}
+    assert normalize_symmetric_two_qubit_directions(qc, pairs) is qc

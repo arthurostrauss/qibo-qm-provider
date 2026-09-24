@@ -50,12 +50,18 @@ from qiskit.transpiler import Layout
 
 from qibo_qm_provider.exceptions import UnsupportedConnectivityError, UnsupportedGateError
 
-from .gate_map import DEFERRED_GATES, QIBO_TO_OPERATION_NAME, QIBO_TO_QISKIT
+from .gate_map import (
+    DEFERRED_GATES,
+    QIBO_TO_OPERATION_NAME,
+    QIBO_TO_QISKIT,
+    SYMMETRIC_TWO_QUBIT_OPERATION_NAMES,
+)
 from .symbolic_parameters import sympy_to_qiskit_parameter
 
 __all__ = [
     "qibo_circuit_to_qiskit",
     "build_qiskit_circuit_directly",
+    "normalize_symmetric_two_qubit_directions",
     "validate_two_qubit_connectivity",
 ]
 
@@ -200,10 +206,11 @@ def _resolve_wire_names(
       pinned layout -- deliberately **not** against ``backend``/its
       ``Target``, so the requested physical assignment is honoured verbatim,
       with no gate-direction "fix-up" or rerouting Qiskit's target-aware
-      passes might otherwise apply (a symmetric-looking gate like ``CZ`` can
-      still be physically asymmetric on this hardware -- see
-      :func:`validate_two_qubit_connectivity`, called by every caller of this
-      function right after, which is the one place direction is judged).
+      passes might otherwise apply. Direction is judged right after, by every
+      caller of this function: :func:`normalize_symmetric_two_qubit_directions`
+      reorders qubit-exchange-symmetric gates (``cz``, ``iswap``) -- exact,
+      and placement-preserving -- then :func:`validate_two_qubit_connectivity`
+      rejects anything still unregistered (e.g. a reversed ``cx``).
       This is the same contract ``qibolab``'s own compiler already honours
       for ``QiboQMPlatformBackend`` (``Compiler.get_sequence`` reads
       ``wire_names[q] for q in gate.qubits``, order preserving).
@@ -264,6 +271,57 @@ def _resolve_wire_names(
     return transpile(qc, initial_layout=layout, optimization_level=0)
 
 
+def normalize_symmetric_two_qubit_directions(
+    qc: QuantumCircuit,
+    qubit_pair_dict: Dict[str, tuple],
+) -> QuantumCircuit:
+    """Reorder the qubits of every qubit-exchange-symmetric two-qubit gate
+    (:data:`~qibo_qm_provider.backend.gate_map.
+    SYMMETRIC_TWO_QUBIT_OPERATION_NAMES`: ``cz``, ``iswap``) written against
+    the machine's registered direction, so it matches that direction.
+
+    Qibo treats connectivity as undirected and its decomposition tables emit
+    both orders freely (e.g. the CZ-based ``SWAP`` rule contains
+    ``CZ(0, 1)`` *and* ``CZ(1, 0)``), while a QuAM pair macro is registered
+    under exactly one ordered ``(control, target)`` tuple. For these gates
+    the two orders are the same unitary, so this rewrite is exact -- it is
+    the same fallback qibolab's own ``TwoQubitContainer`` applies to its
+    ``symmetric`` natives. It changes no placement: the gate still acts on
+    the same two physical qubits.
+
+    Only rewrites when the written order is unregistered *and* the reverse is
+    registered; everything else (asymmetric gates such as ``cx``, pairs with
+    no connectivity at all) is left for :func:`validate_two_qubit_connectivity`
+    to judge. Top-level instructions only, like that function.
+
+    Args:
+        qc: The Qiskit circuit, with physical qubit indices already resolved.
+        qubit_pair_dict: The machine's registered two-qubit connectivity
+            (e.g. ``QMBackend.qubit_pair_dict``).
+
+    Returns:
+        ``qc`` itself when nothing needed reordering, otherwise a copy with
+        the affected instructions' qubits swapped.
+    """
+    valid_pairs = set(qubit_pair_dict.values())
+    flips = []
+    for index, instruction in enumerate(qc.data):
+        if instruction.operation.name not in SYMMETRIC_TWO_QUBIT_OPERATION_NAMES:
+            continue
+        if len(instruction.qubits) != 2:
+            continue
+        a, b = (qc.find_bit(q).index for q in instruction.qubits)
+        if (a, b) not in valid_pairs and (b, a) in valid_pairs:
+            flips.append(index)
+    if not flips:
+        return qc
+    out = qc.copy()
+    for index in flips:
+        instruction = out.data[index]
+        out.data[index] = instruction.replace(qubits=instruction.qubits[::-1])
+    return out
+
+
 def validate_two_qubit_connectivity(
     qc: QuantumCircuit,
     qubit_pair_dict: Dict[str, tuple],
@@ -285,6 +343,10 @@ def validate_two_qubit_connectivity(
     ``quantum_circuit_to_qua``/``run`` -- otherwise the same condition
     surfaces much later as an opaque ``qm_qasm.compiler.CompilationException``
     wrapping ``UnresolvableOperation``, naming neither the gate nor the qubits.
+
+    This check itself is strict for every gate; callers run
+    :func:`normalize_symmetric_two_qubit_directions` first, so by the time a
+    reversed ``cz``/``iswap`` reaches it, it has already been reordered.
 
     Args:
         qc: The Qiskit circuit to check, with physical qubit indices already

@@ -53,9 +53,10 @@ def test_execute_circuit_on_real_hardware(backend):
     execute_circuit docstrings). Their CZ macro is only registered as
     (control=qA2, target=qA1) -- i.e. CZ(1, 0), not CZ(0, 1) -- because the
     physical implementation is asymmetric (QubitPair.moving_qubit): the
-    flux pulse only plays on one specific qubit of the pair. Confirmed
-    directly against this exact machine: CZ(0, 1) raises
-    UnsupportedConnectivityError naming this same fix."""
+    flux pulse only plays on one specific qubit of the pair. CZ(0, 1) is the
+    same unitary and is reordered onto that macro (gate_map.
+    SYMMETRIC_TWO_QUBIT_NATIVE_GATES); before that, it raised
+    UnsupportedConnectivityError on this exact machine."""
     circuit = Circuit(2)
     circuit.add(gates.X(0))
     circuit.add(gates.CZ(1, 0))
