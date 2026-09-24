@@ -42,17 +42,25 @@ class UnsupportedConnectivityError(NotImplementedError):
     """Raised when a two-qubit gate addresses a physical qubit pair with no
     registered connectivity on the wrapped machine, in that direction.
 
-    Many QM two-qubit natives (e.g. a flux-tunable ``CZ``) are physically
-    **asymmetric** -- the flux pulse plays on one specific qubit of the pair
-    (``QubitPair.moving_qubit``) -- so ``CZ(a, b)`` and ``CZ(b, a)`` are *not*
-    interchangeable, even though Qibo itself treats the gate as
-    order-independent and never checks this. ``qiskit_qm_provider``'s
-    ``_populate_target`` registers a qubit-pair macro under exactly one
-    ordered ``(control, target)`` tuple, taken from the QuAM ``QubitPair``'s
-    own roles, with no reverse entry and no symmetric fallback anywhere in
-    ``qm_qasm``'s own qubit-pattern matching (verified directly). Raised
-    before compilation reaches that point, naming the physical qubits
-    involved and, when only the direction is wrong, the order that would work.
+    ``qiskit_qm_provider``'s ``_populate_target`` registers a qubit-pair
+    macro under exactly one ordered ``(control, target)`` tuple, taken from
+    the QuAM ``QubitPair``'s own roles, with no reverse entry and no
+    symmetric fallback anywhere in ``qm_qasm``'s own qubit-pattern matching
+    (verified directly). Raised before compilation reaches that point, naming
+    the physical qubits involved and, when only the direction is wrong, the
+    order that would work.
+
+    Gates whose unitary is symmetric under exchanging the qubits
+    (:data:`~qibo_qm_provider.backend.gate_map.
+    SYMMETRIC_TWO_QUBIT_NATIVE_GATES`: ``CZ``, ``iSWAP``) never raise this for
+    direction alone: ``QiboQMBackend`` reorders them onto the registered
+    direction first (:func:`~qibo_qm_provider.backend.circuit_conversion.
+    normalize_symmetric_two_qubit_directions`). That is exact even though the
+    *pulse* is asymmetric (a flux-tunable ``CZ`` plays on
+    ``QubitPair.moving_qubit`` regardless) -- the pair macro fixes the pulse,
+    and both orders are the same unitary. Direction still matters for
+    genuinely asymmetric gates such as ``CNOT``, which is what this is left
+    raising for.
     """
 
 

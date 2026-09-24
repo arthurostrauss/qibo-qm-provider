@@ -29,7 +29,11 @@ from qiskit_qm_provider.backend.qua_circuit_compilation import QuaCircuitCompila
 from qiskit_qm_provider.parameter_table import InputType, Parameter, ParameterTable
 from quam.core import QuamRoot
 
-from .circuit_conversion import qibo_circuit_to_qiskit, validate_two_qubit_connectivity
+from .circuit_conversion import (
+    normalize_symmetric_two_qubit_directions,
+    qibo_circuit_to_qiskit,
+    validate_two_qubit_connectivity,
+)
 from .default_transpile import default_transpile
 from .gate_map import enum_compatible_quam_natives
 from .measurement_translation import translate_measurements
@@ -303,14 +307,19 @@ class QiboQMBackend(NumpyBackend):
                 only knows the operations *this circuit* emits).
             UnsupportedConnectivityError: If a two-qubit gate addresses a
                 physical qubit pair with no registered connectivity in that
-                direction (many QM two-qubit natives are physically
-                asymmetric). Set ``circuit.wire_names`` to route logical
-                qubits onto the physical qubits/direction that is actually
-                calibrated -- see :func:`~qibo_qm_provider.backend.
-                circuit_conversion.qibo_circuit_to_qiskit`.
+                direction. Qubit-exchange-symmetric gates (``CZ``, ``iSWAP``
+                -- :data:`~qibo_qm_provider.backend.gate_map.
+                SYMMETRIC_TWO_QUBIT_NATIVE_GATES`) are reordered onto the
+                registered direction first and never raise this for
+                direction alone. For an asymmetric gate, set
+                ``circuit.wire_names`` to route logical qubits onto the
+                physical qubits/direction that is actually calibrated -- see
+                :func:`~qibo_qm_provider.backend.circuit_conversion.
+                qibo_circuit_to_qiskit`.
         """
         qubit_dict = self._qiskit_backend.qubit_dict
         qc = qibo_circuit_to_qiskit(circuit, qubit_dict=qubit_dict)
+        qc = normalize_symmetric_two_qubit_directions(qc, self._qiskit_backend.qubit_pair_dict)
         validate_two_qubit_connectivity(qc, self._qiskit_backend.qubit_pair_dict, qubit_dict)
         table = (
             param_table
@@ -341,19 +350,17 @@ class QiboQMBackend(NumpyBackend):
           :class:`~qiskit.transpiler.Layout`, applied via
           :func:`qiskit.compiler.transpile` with no target/basis involved,
           so nothing about the requested assignment (including a two-qubit
-          gate's qubit order) is reinterpreted. A wrong direction still
-          raises :class:`~qibo_qm_provider.exceptions.
-          UnsupportedConnectivityError` exactly as before.
+          gate's qubit order) is reinterpreted. A reversed asymmetric gate
+          (e.g. ``CNOT``) still raises :class:`~qibo_qm_provider.exceptions.
+          UnsupportedConnectivityError`; a reversed ``CZ``/``iSWAP`` is
+          reordered (exact, and placement-preserving -- see
+          :func:`~qibo_qm_provider.backend.circuit_conversion.
+          normalize_symmetric_two_qubit_directions`), on every path.
         * **Left unset**, with ``transpile=True`` (default): an ordinary
           ``transpile(qc, backend=self.qiskit_backend, optimization_level=0)``
           runs against the wrapped machine's real ``Target`` -- Qiskit's own
           preset pass manager picks layout/routing/gate-direction
-          automatically, so e.g. a two-qubit gate written in the physically
-          uncalibrated order is silently corrected (``CZ`` is unitarily
-          symmetric) rather than rejected. This is a real, if narrow,
-          behaviour change from before this existed -- a circuit that used
-          to fail with ``UnsupportedConnectivityError`` may now silently
-          succeed with its gate order corrected.
+          automatically.
 
         Args:
             circuit: A concrete Qibo circuit (no symbolic parameters -- use
@@ -370,7 +377,8 @@ class QiboQMBackend(NumpyBackend):
                 described above. When ``False``, skip *both* -- the fully
                 manual contract this parameter has always had: no pre-check
                 that the circuit is already native or already placed: a
-                non-native gate or an uncalibrated two-qubit direction still
+                non-native gate or an uncalibrated asymmetric two-qubit
+                direction (a reversed ``CZ``/``iSWAP`` is still reordered) still
                 fails, but via the prior error path (e.g. a qm_qasm
                 ``CompilationException``, not a guaranteed
                 ``UnsupportedGateError``/``UnsupportedConnectivityError``
@@ -401,6 +409,7 @@ class QiboQMBackend(NumpyBackend):
             qubit_dict=qubit_dict,
             backend=self._qiskit_backend if transpile else None,
         )
+        qc = normalize_symmetric_two_qubit_directions(qc, self._qiskit_backend.qubit_pair_dict)
         validate_two_qubit_connectivity(qc, self._qiskit_backend.qubit_pair_dict, qubit_dict)
         job = self._qiskit_backend.run(qc, shots=nshots, memory=True)
         result = job.result()
@@ -458,9 +467,15 @@ class QiboQMBackend(NumpyBackend):
             circuits = [self._default_transpile(circuit) for circuit in circuits]
 
         qubit_dict = self._qiskit_backend.qubit_dict
-        qcs = [qibo_circuit_to_qiskit(circuit, qubit_dict=qubit_dict) for circuit in circuits]
+        qubit_pair_dict = self._qiskit_backend.qubit_pair_dict
+        qcs = [
+            normalize_symmetric_two_qubit_directions(
+                qibo_circuit_to_qiskit(circuit, qubit_dict=qubit_dict), qubit_pair_dict
+            )
+            for circuit in circuits
+        ]
         for qc in qcs:
-            validate_two_qubit_connectivity(qc, self._qiskit_backend.qubit_pair_dict, qubit_dict)
+            validate_two_qubit_connectivity(qc, qubit_pair_dict, qubit_dict)
         job = self._qiskit_backend.run(qcs, shots=nshots, memory=True)
         result = job.result()
 

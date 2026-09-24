@@ -69,6 +69,8 @@ __all__ = [
     "OPERATION_NAME_TO_NATIVE_GATE",
     "QIBOLAB_DEFAULT_COMPILER_GATE_NAMES",
     "ENUM_COMPATIBLE_NATIVE_GATES",
+    "SYMMETRIC_TWO_QUBIT_NATIVE_GATES",
+    "SYMMETRIC_TWO_QUBIT_OPERATION_NAMES",
     "enum_compatible_quam_natives",
     "collect_quam_macro_operation_names",
 ]
@@ -205,6 +207,33 @@ ENUM_COMPATIBLE_NATIVE_GATES = frozenset(
     name
     for name in NativeGates.__members__
     if name != "NONE" and name in QIBOLAB_DEFAULT_COMPILER_GATE_NAMES
+)
+
+#: Two-qubit native gates whose unitary is invariant under exchanging the two
+#: qubits (``SWAP · U · SWAP == U``), so ``G(a, b)`` and ``G(b, a)`` are the
+#: *same* operation and a pair macro calibrated in one order implements both
+#: exactly.
+#:
+#: Scoped to gates that can be native on both sides: the two-qubit members of
+#: ``qibo.transpiler.unroller.NativeGates`` (``CZ``, ``iSWAP``, ``CNOT``),
+#: classified the way qibolab's own ``TwoQubitNatives`` field metadata does
+#: (``CZ``/``iSWAP`` ``symmetric: True``, ``CNOT`` ``False``) -- which is what
+#: lets qibolab's ``TwoQubitContainer.__getitem__`` fall back to the reversed
+#: pair for these gates. Kept as an explicit register rather than read from
+#: that (private) metadata at import time; ``test/test_gate_map.py`` pins it
+#: against both sources and checks each unitary's symmetry numerically.
+#:
+#: This is about the *unitary*, not the pulse: a flux-tunable ``CZ`` plays its
+#: flux pulse on one specific qubit of the pair either way -- the pair macro
+#: decides that, not the order a circuit writes the qubits in.
+SYMMETRIC_TWO_QUBIT_NATIVE_GATES = frozenset({"CZ", "iSWAP"})
+
+#: :data:`SYMMETRIC_TWO_QUBIT_NATIVE_GATES` as emitted operation names
+#: (``"cz"``, ``"iswap"``) -- what
+#: :func:`~qibo_qm_provider.backend.circuit_conversion.
+#: normalize_symmetric_two_qubit_directions` matches on.
+SYMMETRIC_TWO_QUBIT_OPERATION_NAMES = frozenset(
+    QIBO_TO_OPERATION_NAME[name] for name in SYMMETRIC_TWO_QUBIT_NATIVE_GATES
 )
 
 #: Operation name -> Qibo native-gate name, restricted to

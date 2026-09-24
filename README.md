@@ -73,7 +73,7 @@ Qibo's per-gate measurement convention:
 
 | Module | What it does |
 |---|---|
-| [`backend/circuit_conversion.py`](qibo_qm_provider/backend/circuit_conversion.py) | Qibo `Circuit` → Qiskit `QuantumCircuit`, gate by gate (concrete or with symbolic `sympy` parameters alike); resolves `circuit.wire_names`; validates two-qubit connectivity direction |
+| [`backend/circuit_conversion.py`](qibo_qm_provider/backend/circuit_conversion.py) | Qibo `Circuit` → Qiskit `QuantumCircuit`, gate by gate (concrete or with symbolic `sympy` parameters alike); resolves `circuit.wire_names`; reorders symmetric two-qubit gates (`CZ`, `iSWAP`) onto the registered direction and validates the rest |
 | [`backend/default_transpile.py`](qibo_qm_provider/backend/default_transpile.py) | `execute_circuit`'s default, opt-out-able (`transpile=False`) step: decomposes any gate not already native to the target into its native gate set (e.g. a plain `H` with no `h` macro installed) |
 | [`backend/gate_map.py`](qibo_qm_provider/backend/gate_map.py), [`backend/qibo_qiskit_gates.py`](qibo_qm_provider/backend/qibo_qiskit_gates.py) | The verified Qibo↔Qiskit gate correspondence, plus thin gate subclasses that keep Qibo's own gate name (`prx`, `u1q`, ...) instead of the name Qiskit's standard gate would otherwise emit |
 | [`backend/symbolic_parameters.py`](qibo_qm_provider/backend/symbolic_parameters.py) | `sympy` expression → Qiskit `Parameter`, and parameter-name collision checks against the machine's installed operation names |
@@ -217,17 +217,13 @@ gate's qubit order — is reinterpreted.
 
 - `QiboQMPlatformBackend` (and plain `QiboQMBackend` with `transpile=False`)
   do no placement at all: a circuit's qubit index `i` addresses whichever
-  QuAM/platform qubit sits at position `i`, exactly as before. A two-qubit
-  gate written in the physically uncalibrated order fails, either as
-  `UnsupportedConnectivityError` (`QiboQMBackend`) or an opaque compiler
-  error (`QiboQMPlatformBackend`, which has no equivalent pre-check).
+  QuAM/platform qubit sits at position `i`, exactly as before. Two-qubit
+  direction is handled as described below.
 - `QiboQMBackend` with `transpile=True` (the default) now runs an ordinary
   `qiskit.compiler.transpile(qc, backend=self.qiskit_backend,
   optimization_level=0)` against the wrapped machine's real `Target` —
   Qiskit's own preset pass manager picks layout/routing/gate-direction
-  automatically. Since e.g. `CZ` is unitarily symmetric, a two-qubit gate
-  written in the physically uncalibrated order is silently **corrected**
-  rather than rejected. `optimization_level=0` is deliberate: a higher
+  automatically. `optimization_level=0` is deliberate: a higher
   level would also apply passes like `RemoveDiagonalGatesBeforeMeasure`,
   which could drop a gate immediately preceding a same-basis measurement of
   its own qubits — mathematically output-equivalent, but not the pulse
@@ -240,13 +236,26 @@ stays a plain no-op and gates are never auto-decomposed; both expect an
 already-native, already-placed circuit (or will fail at compile time the
 old way). See #8 for transpile parity on those APIs.
 
-Many QM two-qubit natives (e.g. a flux-tunable `CZ`) are physically
-**asymmetric** — the flux pulse only plays on one qubit of the pair — so
-`CZ(a, b)` and `CZ(b, a)` are not interchangeable even though Qibo treats
-the gate as order-independent. Writing the wrong direction with an explicit
-`wire_names`, or anywhere `transpile=False` is in effect, still raises a
-clear `UnsupportedConnectivityError` naming the direction that is actually
-installed, rather than an opaque compiler failure.
+A QuAM qubit-pair macro is registered under one ordered `(control, target)`
+pair, and Qibo — whose connectivity is an undirected graph — writes
+two-qubit gates in either order (Qibo's CZ-based `SWAP` decomposition
+contains both `CZ(0, 1)` and `CZ(1, 0)`). How the order is treated depends on
+the gate:
+
+- **Qubit-exchange-symmetric natives** —
+  `gate_map.SYMMETRIC_TWO_QUBIT_NATIVE_GATES`: `CZ`, `iSWAP`, the same
+  classification as qibolab's own `TwoQubitNatives` metadata — are the same
+  unitary in either order, so a reversed one is reordered onto the
+  registered direction on every `QiboQMBackend` path (`execute_circuit`,
+  `execute_circuits`, `circuit_to_qua`, explicit `wire_names`,
+  `transpile=False`). This is exact even though the *pulse* is asymmetric (a
+  flux-tunable `CZ` always plays on the pair's moving qubit — the macro
+  decides that, not the written order), and it matches qibolab's own
+  reversed-pair fallback, so `QiboQMPlatformBackend` behaves the same.
+- **Asymmetric gates** (e.g. `CNOT`) written against the registered
+  direction raise a clear `UnsupportedConnectivityError` naming the
+  direction that is actually installed, rather than an opaque compiler
+  failure.
 
 ## Status note — 2026-09-03
 

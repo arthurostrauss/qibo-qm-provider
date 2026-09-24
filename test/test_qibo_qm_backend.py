@@ -207,6 +207,11 @@ def test_circuit_to_qua_rejects_parameter_name_colliding_with_machine_gate(add_b
 # add_basic_macros_installed fixture, "q0-q1" has qubit_control="q0"
 # (index 0), qubit_target="q1" (index 1), so CZ(0,1) is the one direction
 # that is actually installed.
+#
+# CZ/iSWAP are unitarily symmetric under exchanging the qubits
+# (gate_map.SYMMETRIC_TWO_QUBIT_NATIVE_GATES), so a reversed one is reordered
+# onto the registered direction on every path; direction is only enforced for
+# genuinely asymmetric gates (CNOT -> "cx" below).
 # --------------------------------------------------------------------------- #
 
 
@@ -222,11 +227,10 @@ def test_circuit_to_qua_compiles_valid_cz_direction(add_basic_macros_installed):
     backend.circuit_to_qua(circuit)  # must not raise
 
 
-def test_circuit_to_qua_rejects_reversed_cz_direction(add_basic_macros_installed):
-    """The precise failure mode found live on "arbel": CZ written in the
-    physically-uncalibrated direction must raise a clear, actionable error
-    naming the correct direction, not qm_qasm's opaque UnresolvableOperation
-    surfacing from deep inside the compiler."""
+def test_circuit_to_qua_reorders_reversed_cz_direction(add_basic_macros_installed):
+    """The "arbel" case: CZ written in the uncalibrated order is the same
+    unitary as the calibrated one, so it compiles onto the installed macro
+    instead of raising."""
     from qibo import Circuit, gates
 
     backend = QiboQMBackend(add_basic_macros_installed)
@@ -234,7 +238,40 @@ def test_circuit_to_qua_rejects_reversed_cz_direction(add_basic_macros_installed
     circuit = Circuit(2)
     circuit.add(gates.CZ(1, 0))
 
-    with pytest.raises(UnsupportedConnectivityError, match=r"cz\(q1, q0\).*cz\(q0, q1\)"):
+    backend.circuit_to_qua(circuit)  # must not raise
+
+
+def test_circuit_to_qua_compiles_qibo_swap_decomposition(add_basic_macros_installed):
+    """Qibo's CZ-based SWAP rule contains CZ(0, 1) *and* CZ(1, 0) -- no
+    wire_names assignment can satisfy both, so this only compiles because
+    symmetric gates are reordered."""
+    import warnings
+
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    circuit = Circuit(2)
+    circuit.add(gates.SWAP(0, 1))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        transpiled = backend._default_transpile(circuit)
+    assert {gate.qubits for gate in transpiled.queue if isinstance(gate, gates.CZ)} == {(0, 1), (1, 0)}
+
+    backend.circuit_to_qua(transpiled)  # must not raise
+
+
+def test_circuit_to_qua_rejects_reversed_asymmetric_gate_direction(add_basic_macros_installed):
+    """Direction is still enforced for an asymmetric gate: a clear,
+    actionable error naming the correct direction, not qm_qasm's opaque
+    UnresolvableOperation surfacing from deep inside the compiler."""
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+
+    circuit = Circuit(2)
+    circuit.add(gates.CNOT(1, 0))
+
+    with pytest.raises(UnsupportedConnectivityError, match=r"cx\(q1, q0\).*cx\(q0, q1\)"):
         backend.circuit_to_qua(circuit)
 
 
@@ -267,22 +304,43 @@ def test_execute_circuit_default_layout_auto_corrects_reversed_cz_direction(add_
     assert [qc.find_bit(q).index for q in cz_instr.qubits] == [0, 1]
 
 
-def test_execute_circuit_transpile_false_leaves_reversed_cz_direction_unfixed(add_basic_macros_installed):
+def test_execute_circuit_transpile_false_leaves_reversed_asymmetric_direction_unfixed(add_basic_macros_installed):
     """``transpile=False`` opts out of *all* automatic behaviour, not just
-    Qibo-level gate decomposition -- including the new automatic-layout
-    step above, so a caller who wants full manual control still gets
-    exactly that (the same "compile it verbatim, fail later if it's wrong"
-    contract this parameter has always documented)."""
+    Qibo-level gate decomposition -- including the automatic-layout step
+    above, so a caller who wants full manual control still gets exactly
+    that (the same "compile it verbatim, fail later if it's wrong" contract
+    this parameter has always documented). Only a reversed *asymmetric* gate
+    can show this now -- reordering a symmetric one is exact, not a
+    transpile step, and happens regardless."""
     from qibo import Circuit, gates
 
     backend = QiboQMBackend(add_basic_macros_installed)
 
     circuit = Circuit(2)
-    circuit.add(gates.CZ(1, 0))
+    circuit.add(gates.CNOT(1, 0))
     circuit.add(gates.M(0, 1))
 
     with pytest.raises(UnsupportedConnectivityError):
         backend.execute_circuit(circuit, transpile=False)
+
+
+def test_execute_circuit_transpile_false_still_reorders_reversed_cz(add_basic_macros_installed):
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    circuit = Circuit(2)
+    circuit.add(gates.CZ(1, 0))
+    circuit.add(gates.M(0, 1))
+
+    with (
+        patch.object(backend.qiskit_backend, "run") as mock_run,
+        patch("qibo_qm_provider.backend.qibo_qm_backend.translate_measurements"),
+    ):
+        backend.execute_circuit(circuit, transpile=False)
+
+    (qc,), _ = mock_run.call_args
+    cz_instr = next(instr for instr in qc.data if instr.operation.name == "cz")
+    assert [qc.find_bit(q).index for q in cz_instr.qubits] == [0, 1]
 
 
 def test_circuit_to_qua_wire_names_routes_logical_qubits_to_the_calibrated_direction(add_basic_macros_installed):
@@ -293,18 +351,26 @@ def test_circuit_to_qua_wire_names_routes_logical_qubits_to_the_calibrated_direc
 
     backend = QiboQMBackend(add_basic_macros_installed)
 
-    # logical 0 -> "q1", logical 1 -> "q0": CZ(0,1) (logical) now addresses
-    # physical (1, 0) -- the direction that is NOT installed.
+    # logical 0 -> "q1", logical 1 -> "q0": CNOT(0,1) (logical) now addresses
+    # physical (1, 0) -- the direction that is NOT installed. (An asymmetric
+    # gate: a reversed CZ would simply be reordered.)
     wrong_direction = Circuit(2, wire_names=["q1", "q0"])
-    wrong_direction.add(gates.CZ(0, 1))
+    wrong_direction.add(gates.CNOT(0, 1))
     with pytest.raises(UnsupportedConnectivityError):
         backend.circuit_to_qua(wrong_direction)
 
     # Swapping the gate's own argument order compensates, landing back on
-    # the calibrated physical (0, 1) direction.
+    # the calibrated physical (0, 1) direction -- which fails only for the
+    # missing cx macro now, not for direction.
     right_direction = Circuit(2, wire_names=["q1", "q0"])
-    right_direction.add(gates.CZ(1, 0))
-    backend.circuit_to_qua(right_direction)  # must not raise
+    right_direction.add(gates.CNOT(1, 0))
+    from qibo_qm_provider.backend.circuit_conversion import (
+        qibo_circuit_to_qiskit,
+        validate_two_qubit_connectivity,
+    )
+
+    qc = qibo_circuit_to_qiskit(right_direction, qubit_dict=backend.qiskit_backend.qubit_dict)
+    validate_two_qubit_connectivity(qc, backend.qiskit_backend.qubit_pair_dict)  # must not raise
 
 
 # --------------------------------------------------------------------------- #
@@ -431,20 +497,44 @@ def test_execute_circuits_rejects_symbolic_circuit(add_basic_macros_installed):
         backend.execute_circuits([circuit])
 
 
-def test_execute_circuits_rejects_reversed_cz_direction(add_basic_macros_installed):
+def test_execute_circuits_rejects_reversed_asymmetric_direction(add_basic_macros_installed):
     """The connectivity check must fire before execute_circuits ever
     attempts to submit a job (no live QM connection is set up in this
-    fixture)."""
+    fixture). ``transpile=False`` keeps the CNOT from being decomposed into
+    (reorderable) CZs first."""
     from qibo import Circuit, gates
 
     backend = QiboQMBackend(add_basic_macros_installed)
 
     circuit = Circuit(2)
-    circuit.add(gates.CZ(1, 0))
+    circuit.add(gates.CNOT(1, 0))
     circuit.add(gates.M(0, 1))
 
     with pytest.raises(UnsupportedConnectivityError):
-        backend.execute_circuits([circuit])
+        backend.execute_circuits([circuit], transpile=False)
+
+
+def test_execute_circuits_reorders_reversed_cz_in_every_circuit(add_basic_macros_installed):
+    from qibo import Circuit, gates
+
+    backend = QiboQMBackend(add_basic_macros_installed)
+    circuits = []
+    for _ in range(2):
+        circuit = Circuit(2)
+        circuit.add(gates.CZ(1, 0))
+        circuit.add(gates.M(0, 1))
+        circuits.append(circuit)
+
+    with (
+        patch.object(backend.qiskit_backend, "run") as mock_run,
+        patch("qibo_qm_provider.backend.qibo_qm_backend.translate_measurements"),
+    ):
+        backend.execute_circuits(circuits, transpile=False)
+
+    (qcs,), _ = mock_run.call_args
+    for qc in qcs:
+        cz_instr = next(instr for instr in qc.data if instr.operation.name == "cz")
+        assert [qc.find_bit(q).index for q in cz_instr.qubits] == [0, 1]
 
 
 def test_execute_circuits_submits_one_job_for_the_whole_batch(add_basic_macros_installed):
