@@ -66,6 +66,13 @@ class QiboQMBackend(NumpyBackend):
         super().__init__()
         self.name = name or "qibo-qm-provider"
         self._qiskit_backend = QMBackend(machine, qmm=qmm, init_macro=init_macro, name=name)
+    
+    @property
+    def machine(self) -> QuamRoot:
+        """
+        The QuAM machine object.
+        """
+        return self._qiskit_backend.machine
 
     @classmethod
     def from_qiskit_backend(cls, qiskit_backend: QMBackend) -> "QiboQMBackend":
