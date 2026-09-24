@@ -60,13 +60,13 @@ def test_natives_reflect_wrapped_target_after_add_basic_macros(add_basic_macros_
     backend = QiboQMBackend(add_basic_macros_installed)
     backend.qiskit_backend.update_target()
 
-    # add_basic_macros installs id/x/sx/sy/sydg/rz/measure/reset/delay on every
-    # qubit and cz on the pair -- natives is the shared Enum∩QuAM-macro set
-    # (issue #6), so only id/rz/measure/cz (-> I/RZ/M/CZ) survive; x/sx/sy/
-    # sydg/reset/delay have no Enum-compatible NativeGates∩qibolab-compiler
-    # entry and are correctly absent, unlike the raw (unfiltered)
-    # target.operation_names.
-    assert set(backend.natives) == {"I", "RZ", "M", "CZ"}
+    # add_basic_macros installs id/x/sx/sy/sydg/rz/z/gpi2/measure/reset/delay
+    # on every qubit and cz on the pair -- natives is the shared Enum∩QuAM-
+    # macro set (issue #6), so only id/z/rz/gpi2/measure/cz (-> I/Z/RZ/GPI2/
+    # M/CZ) survive; x/sx/sy/sydg/reset/delay have no Enum-compatible
+    # NativeGates∩qibolab-compiler entry and are correctly absent, unlike the
+    # raw (unfiltered) target.operation_names.
+    assert set(backend.natives) == {"I", "Z", "RZ", "GPI2", "M", "CZ"}
     # The raw, unfiltered view still carries the rest (x/sx/sy/... plus
     # control-flow op names), confirming natives is a real filter, not a
     # renaming of the whole set.
@@ -392,12 +392,14 @@ def test_execute_circuit_already_native_gate_is_unaffected_by_transpile(add_basi
 
 
 def test_execute_circuit_non_native_non_decomposable_gate_raises_actionable_error(add_basic_macros_installed):
-    """No GPI2/U3 installed on this fixture by default -- H genuinely cannot
-    be decomposed, and that must surface as UnsupportedGateError, not a bare
-    upstream DecompositionError."""
+    """Without GPI2/U3 (add_basic_macros' gpi2 removed here) H genuinely
+    cannot be decomposed, and that must surface as UnsupportedGateError, not
+    a bare upstream DecompositionError."""
     from qibo import Circuit, gates
     from qibo_qm_provider.exceptions import UnsupportedGateError
 
+    for qubit in add_basic_macros_installed.active_qubits:
+        qubit.macros.pop("gpi2")
     backend = QiboQMBackend(add_basic_macros_installed)
     assert "GPI2" not in backend.natives and "U3" not in backend.natives
 
@@ -586,17 +588,20 @@ def test_register_gate_installs_macro_on_qubit_pair(backend, dummy_machine):
     assert "bar" in backend.qiskit_backend.target.operation_names
 
 
-def test_register_gate_warns_when_overwriting_an_existing_name(backend, dummy_machine):
-    """Overwriting an existing macro name may not reach the compiler under
-    this package's currently declared qiskit-qm-provider floor (see
-    register_gate's docstring) -- silently succeeding here would hide that
-    hazard, so it must warn loudly instead."""
+def test_register_gate_overwrites_an_existing_name_without_warning(backend, dummy_machine):
+    """Since qiskit-qm-provider 0.3.5 (operation_key cache fix), overwriting an
+    existing macro name reaches the compiler, so there is nothing to warn about."""
+    import warnings
+
     from quam.components.macro import PulseMacro
 
     backend.register_gate("foo", 0, PulseMacro(pulse="x180"))
+    replacement = PulseMacro(pulse="x180")
 
-    with pytest.warns(UserWarning, match="overwriting an existing macro"):
-        backend.register_gate("foo", 0, PulseMacro(pulse="x180"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        backend.register_gate("foo", 0, replacement)
+    assert dummy_machine.qubits["q0"].macros["foo"] is replacement
 
 
 def test_natives_match_across_backends_for_same_machine(add_basic_macros_installed):
@@ -607,4 +612,4 @@ def test_natives_match_across_backends_for_same_machine(add_basic_macros_install
     qm.qiskit_backend.update_target()
     platform = QiboQMPlatformBackend.from_machine(add_basic_macros_installed)
 
-    assert set(qm.natives) == set(platform.natives) == {"I", "RZ", "M", "CZ"}
+    assert set(qm.natives) == set(platform.natives) == {"I", "Z", "RZ", "GPI2", "M", "CZ"}

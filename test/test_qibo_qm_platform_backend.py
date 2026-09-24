@@ -172,7 +172,7 @@ def test_natives_are_enum_compatible_quam_macros(add_basic_macros_installed):
     """PlatformBackend.natives matches the shared Enum∩QuAM-macro set, not
     the wider inherited QibolabBackend.natives (which includes GPI/Align)."""
     backend = QiboQMPlatformBackend.from_machine(add_basic_macros_installed)
-    assert set(backend.natives) == {"I", "RZ", "M", "CZ"}
+    assert set(backend.natives) == {"I", "Z", "RZ", "GPI2", "M", "CZ"}
     # Custom / compiler-only names stay out of the shared Enum∩QuAM set.
     assert "GPI" not in backend.natives
     assert "Align" not in backend.natives

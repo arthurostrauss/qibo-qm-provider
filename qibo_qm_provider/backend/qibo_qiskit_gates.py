@@ -12,7 +12,9 @@ Two families of gate live here, for two different reasons:
 
 1. **No Qiskit standard-library equivalent at all** (``GPI``, ``GPI2``,
    ``QiboMSGate``): plain ``Gate`` subclasses with a hand-provided
-   ``_define()``/``__array__``.
+   ``_define()``/``__array__``. ``GPIGate``/``GPI2Gate`` (like ``FSimGate``)
+   are re-exported from ``qiskit_qm_provider.additional_gates`` rather than
+   defined here.
 2. **A Qiskit standard gate exists, but under a different name**
    (``QiboU1Gate``, ``QiboU2Gate``, ``QiboU3Gate``, ``QiboPRXGate``,
    ``QiboU1qGate``, ``QiboCU1Gate``, ``QiboCU2Gate``, ``QiboCU3Gate``,
@@ -56,9 +58,12 @@ from qiskit.circuit import Gate, QuantumCircuit
 from qiskit.circuit.parameterexpression import ParameterValueType
 from qiskit.circuit.library import CPhaseGate, CUGate, PhaseGate, RGate, UGate, XXPlusYYGate
 
-# fSim is already defined upstream and verified equal to qibo.fSim -- re-exported
-# rather than redefined, so there is exactly one definition of it in the stack.
-from qiskit_qm_provider.additional_gates import FSimGate
+# fSim, GPI and GPI2 are already defined upstream (GPI/GPI2 since
+# qiskit-qm-provider 0.3.5, with the same "gpi"/"gpi2" names and Qibo's own
+# qasm_label decompositions) and verified equal to their qibo counterparts --
+# re-exported rather than redefined, so there is exactly one definition of each
+# in the stack, and the ones QMBackend puts in its Target are the same classes.
+from qiskit_qm_provider.additional_gates import FSimGate, GPI2Gate, GPIGate
 
 __all__ = [
     "GPIGate",
@@ -75,57 +80,6 @@ __all__ = [
     "QiboCU3Gate",
     "QiboRXXYYGate",
 ]
-
-
-class GPIGate(Gate):
-    r"""Qibo's ``GPI`` gate: :math:`\begin{pmatrix} 0 & e^{-i\phi} \\
-    e^{i\phi} & 0 \end{pmatrix}`.
-
-    An IonQ-native gate with no Qiskit standard-library equivalent.
-    """
-
-    def __init__(self, phi: ParameterValueType, label: str | None = None):
-        super().__init__("gpi", 1, [phi], label=label)
-
-    def _define(self) -> None:
-        # Qibo's own qasm_label body: u3(pi, phi - pi/2, pi/2 - phi)
-        phi = self.params[0]
-        qc = QuantumCircuit(1, name=self.name)
-        qc.u(np.pi, phi - np.pi / 2, np.pi / 2 - phi, 0)
-        self.definition = qc
-
-    def __array__(self, dtype=complex, copy=None):
-        if copy is False:
-            raise ValueError("unable to avoid copy while creating an array as requested")
-        phi = complex(self.params[0])
-        return np.array([[0, np.exp(-1j * phi)], [np.exp(1j * phi), 0]], dtype=dtype)
-
-
-class GPI2Gate(Gate):
-    r"""Qibo's ``GPI2`` gate: :math:`\frac{1}{\sqrt2}\begin{pmatrix}
-    1 & -i e^{-i\phi} \\ -i e^{i\phi} & 1 \end{pmatrix}`.
-
-    An IonQ-native gate with no Qiskit standard-library equivalent.
-    """
-
-    def __init__(self, phi: ParameterValueType, label: str | None = None):
-        super().__init__("gpi2", 1, [phi], label=label)
-
-    def _define(self) -> None:
-        # Qibo's own qasm_label body: u3(pi/2, phi - pi/2, pi/2 - phi)
-        phi = self.params[0]
-        qc = QuantumCircuit(1, name=self.name)
-        qc.u(np.pi / 2, phi - np.pi / 2, np.pi / 2 - phi, 0)
-        self.definition = qc
-
-    def __array__(self, dtype=complex, copy=None):
-        if copy is False:
-            raise ValueError("unable to avoid copy while creating an array as requested")
-        phi = complex(self.params[0])
-        return np.array(
-            [[1, -1j * np.exp(-1j * phi)], [-1j * np.exp(1j * phi), 1]],
-            dtype=dtype,
-        ) / np.sqrt(2)
 
 
 class QiboMSGate(Gate):

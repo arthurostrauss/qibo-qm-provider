@@ -136,7 +136,7 @@ def add_basic_macros_installed(dummy_machine: FluxTunableQuam) -> FluxTunableQua
     """``dummy_machine`` after running ``add_basic_macros`` on it.
 
     Exercises the macro-installation path end to end. Each qubit's
-    ``.macros`` dict ends up populated with ``x, sx, sy, sydg, rz, measure,
+    ``.macros`` dict ends up populated with ``x, sx, sy, sydg, rz, z, gpi2, measure,
     reset, delay, id``, since that part of ``add_basic_macros`` only touches
     plain Python objects and has no coupler/hardware dependency.
 

@@ -9,6 +9,7 @@ called out explicitly rather than by silently editing history.
 
 | Date | Slice | Section |
 |---|---|---|
+| 2026-09-24 | `qiskit-qm-provider>=0.3.5`: `register_gate` override bug closed; `GPI2Macro`/`ZMacro` seeded by `add_basic_macros` so Qibo's GPI2 unroller path works end to end; `default_transpile` validates decomposition output | [GPI2 and Z macros, `qiskit-qm-provider` 0.3.5](#gpi2-and-z-macros-qiskit-qm-provider-035-2026-09-24) |
 | 2026-09-22 | `QiboQMBackend`: explicit `wire_names` now resolved via a real `qiskit.transpiler.Layout` + `transpile()`; unset `wire_names` gets an automatic, backend-targeted `transpile()` by default. Closes #7 for this backend; `QiboQMPlatformBackend` deliberately left unchanged | [Layout-based placement and automatic default-layout transpile for `QiboQMBackend`](#layout-based-placement-and-automatic-default-layout-transpile-for-qiboqmbackend-2026-09-22) |
 | 2026-09-06 | `scaffold.py`: writes the `platform.py`+`quam_source.json` folder pair `$QIBOLAB_PLATFORMS` name resolution needs; CLI added | [Platform-folder scaffolding: `$QIBOLAB_PLATFORMS` resolution closed](#platform-folder-scaffolding-qibolab_platforms-resolution-closed-2026-09-06) |
 | 2026-09-03 | `IQCCQmController`: `QmController` subclass executing through IQCC's cloud manager, dispatched automatically from the machine's own `network` config | [`IQCCQmController`: cloud execution for `QiboQMPlatformBackend`](#iqccqmcontroller-cloud-execution-for-qiboqmplatformbackend-2026-09-03) |
@@ -33,6 +34,56 @@ Companion documents: `symbolic_circuit_lowering.md` (the 2026-08-26 path, in
 depth, plus the findings and compromises behind it), `slice2_plan.md` (what is
 next for it), `qibo_backend_vs_qibolab_platform.md`,
 `qibolab_platform_from_quam_plan.md`, `qibocal_multi_qubit_handling.md`.
+
+## GPI2 and Z macros, `qiskit-qm-provider` 0.3.5 (2026-09-24)
+
+**Dependency floor raised to `qiskit-qm-provider>=0.3.5`.** That release
+ships the `operation_key` fix described in the 2026-08-26 section below, so
+`register_gate` against an existing name now reaches the compiler. The
+`UserWarning` it used to emit and the matching docstring warning are gone,
+and `test_register_gate_cannot_override_an_existing_operation` (formerly
+`xfail`) is now a plain passing `test_register_gate_overrides_an_existing_operation`.
+0.3.5 also ships `GPIGate`/`GPI2Gate` in `qiskit_qm_provider.additional_gates`
+(same names, same Qibo `qasm_label` decompositions), so
+`qibo_qiskit_gates` now re-exports them instead of defining its own.
+
+**Why the transpiler needed more than a `gpi2` macro.** Qibo's `Unroller`
+decomposes single-qubit gates onto either `U3` or `GPI2`
+(`_translate_single_qubit_gates`), so a `gpi2` macro is what makes
+decomposition possible at all. But Qibo's decomposition tables also assume
+`Z` is always native (`NativeGates.default()` contains it) and emit it
+whatever native set is requested: `gpi2_dec` has `H -> [Z, GPI2(pi/2)]`,
+`X -> [GPI2, GPI2, Z]`, `Y -> [Z, GPI2, GPI2]`, and `u3_dec` has
+`Z -> [Z]`. A machine seeded only by upstream's `add_basic_macros` has `rz`
+but no `z`, so with just `gpi2` installed, `H` got through the unroller as
+`[Z, GPI2]`, and the `Z` then failed deep inside `qm_qasm`
+(`SignatureNotFoundException` for `U`, since the exporter inlined `z ->
+p(pi) -> U(0,0,pi)`), a worse failure than the previous clean
+`UnsupportedGateError`.
+
+**What was added.**
+
+- `quam_macros.superconducting.single_qubit_macros.GPI2Macro`:
+  `GPI2(phi) = RZ(phi) · RX(pi/2) · RZ(-phi)` (a pi/2 rotation about
+  `(cos phi, sin phi, 0)`), i.e. in time order `rz(-phi)`, `sx`, `rz(phi)`,
+  up to global phase. `apply` calls the qubit's own `rz`/`sx` macros' `apply`
+  (names configurable), so it costs one `x90` pulse plus two frame updates
+  and follows any recalibration of those macros.
+- `ZMacro`: `Z = RZ(pi)` up to global phase, via the `rz` macro.
+- `add_basic_macros` installs both (`gpi2`, `z`) on every active qubit that
+  has the required `sx`/`rz` macros and not already a `gpi2`/`z`, so it also
+  tops up machines seeded earlier. Default natives on a seeded machine are
+  now `{I, Z, RZ, GPI2, M, CZ}` on both backends.
+- `default_transpile` now checks every gate a decomposition returns against
+  `already_native ∪ decomposition_targets`, and raises `UnsupportedGateError`
+  naming the offending gates, so a future mismatch like `Z` fails at
+  transpile time rather than inside the QUA compiler.
+
+Verified: GPI2/Z decompositions against `qibo.gates.*.matrix()` up to global
+phase; `H`, `X`, `Y`, `S`, `T`, `RX`, `RY`, `U3`, `CNOT` all transpile onto
+natives, match the original unitary up to global phase, and compile to QUA;
+the new macros round-trip through `QuamRoot.to_dict()`/`load()`. Not yet
+exercised on hardware.
 
 ## Layout-based placement and automatic default-layout transpile for `QiboQMBackend` (2026-09-22)
 

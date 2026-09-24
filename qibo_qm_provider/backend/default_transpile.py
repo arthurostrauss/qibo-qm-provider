@@ -90,11 +90,14 @@ def default_transpile(
     Raises:
         UnsupportedGateError: If a gate is neither already native nor
             decomposable into ``decomposition_targets`` by Qibo's
-            transpiler.
+            transpiler, or if its decomposition contains a gate outside
+            ``already_native``/``decomposition_targets`` (Qibo's tables
+            assume e.g. ``Z`` is always available).
     """
     skip = frozenset(already_native) | _SKIP_DECOMPOSITION
     targets = [name for name in decomposition_targets if name in NativeGates.__members__ and name != "NONE"]
     native_flag = NativeGates[targets] if targets else None
+    runnable = frozenset(already_native) | frozenset(targets) | {"M"}
 
     new_circuit = QiboCircuit(**circuit.init_kwargs)
     decomposed_gate_names: List[str] = []
@@ -129,7 +132,21 @@ def default_transpile(
                 f"Decompose it yourself first, or pass transpile=False and supply "
                 f"an already-native circuit."
             ) from exc
-        for decomposed_gate in decomposition if isinstance(decomposition, list) else [decomposition]:
+        decomposed_gates = decomposition if isinstance(decomposition, list) else [decomposition]
+        # Qibo's decomposition tables assume some gates (notably Z) are always
+        # native, whatever `targets` says -- so check what came back rather
+        # than let an unrunnable gate fail later, deep in the QUA compiler.
+        unrunnable = sorted({type(g).__name__ for g in decomposed_gates} - runnable)
+        if unrunnable:
+            raise UnsupportedGateError(
+                f"Qibo gate {name} on qubits {gate.qubits} is not native to this "
+                f"machine, and Qibo's transpiler decomposed it into {unrunnable}, "
+                f"which this machine cannot run either (native gates: "
+                f"{sorted(runnable - {'M'})}). Install the missing macro(s) on the "
+                f"QuAM machine, decompose the gate yourself first, or pass "
+                f"transpile=False and supply an already-native circuit."
+            )
+        for decomposed_gate in decomposed_gates:
             new_circuit.add(decomposed_gate)
         decomposed_gate_names.append(name)
 
