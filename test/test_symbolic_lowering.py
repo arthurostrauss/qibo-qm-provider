@@ -641,7 +641,7 @@ def test_symbolic_gate_reaches_macro_as_qua_variable(add_basic_macros_installed)
     (not a bare Qiskit ``RGate``), ``prx`` is exactly the operation name the
     lowering emits. There is no rename to route around here (see
     ``qibo_qiskit_gates`` module docstring), and no reason to override
-    ``rz`` instead -- see ``test_register_gate_cannot_override_an_existing_operation``.
+    ``rz`` instead.
     """
     from qm.qua import program
 
@@ -663,24 +663,9 @@ def test_symbolic_gate_reaches_macro_as_qua_variable(add_basic_macros_installed)
         assert not isinstance(value, float), f"angle was baked in as {value!r}"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Upstream limitation, found while building this path -- root-caused precisely: "
-        "qm_qasm.OperationIdentifier has no __eq__/__hash__ (falls back to identity), so "
-        "qiskit-qm-provider's internal QUA-operation cache, keyed by that class directly, "
-        "silently added a duplicate entry instead of overwriting one for an operation name "
-        "that already existed. register_gate('rz', ...) after backend construction showed "
-        "up in .natives while the compiler kept running the original macro. Fixed upstream "
-        "in source (qiskit_qm_provider.backend.backend_utils.operation_key, used throughout "
-        "QMBackend) but not yet released -- this package's dependency floor "
-        "(qiskit-qm-provider>=0.3.4) predates it, so xfail here reflects what a plain "
-        "`pip install` gets today. Installing the macro before constructing the backend "
-        "remains the workaround either way. XPASS (harmless, strict=False) once the fix is "
-        "installed -- e.g. locally, while testing against the patched source directly."
-    ),
-    strict=False,
-)
-def test_register_gate_cannot_override_an_existing_operation(add_basic_macros_installed):
+def test_register_gate_overrides_an_existing_operation(add_basic_macros_installed):
+    """Replacing an existing name after backend construction reaches the compiler
+    (qiskit-qm-provider 0.3.5 operation_key fix)."""
     from qm.qua import program
 
     backend = QiboQMBackend(add_basic_macros_installed)
@@ -700,7 +685,7 @@ def test_register_gate_cannot_override_an_existing_operation(add_basic_macros_in
 
 
 def test_macro_installed_before_backend_construction_is_used(add_basic_macros_installed):
-    """The documented workaround for the limitation above."""
+    """Installing a macro before constructing the backend works too."""
     from qm.qua import program
 
     machine = add_basic_macros_installed

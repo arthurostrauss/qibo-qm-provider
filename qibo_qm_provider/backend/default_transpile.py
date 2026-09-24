@@ -31,6 +31,7 @@ import warnings
 from typing import Iterable, List
 
 from qibo.models import Circuit as QiboCircuit
+from qibo.transpiler.asserts import assert_decomposition
 from qibo.transpiler.unroller import DecompositionError, NativeGates, translate_gate
 
 from qibo_qm_provider.exceptions import UnsupportedGateError
@@ -90,11 +91,14 @@ def default_transpile(
     Raises:
         UnsupportedGateError: If a gate is neither already native nor
             decomposable into ``decomposition_targets`` by Qibo's
-            transpiler.
+            transpiler, or if the decomposition Qibo returns fails Qibo's own
+            ``assert_decomposition`` against ``decomposition_targets``.
     """
     skip = frozenset(already_native) | _SKIP_DECOMPOSITION
-    targets = [name for name in decomposition_targets if name in NativeGates.__members__ and name != "NONE"]
-    native_flag = NativeGates[targets] if targets else None
+    # Built the way Qibo's own default transpiler does (NativeGates[natives]):
+    # names that are not NativeGates members (e.g. "GPI", "Align") map to NONE.
+    decomposition_targets = list(decomposition_targets)
+    native_flag = NativeGates[decomposition_targets] if decomposition_targets else NativeGates.NONE
 
     new_circuit = QiboCircuit(**circuit.init_kwargs)
     decomposed_gate_names: List[str] = []
@@ -103,7 +107,7 @@ def default_transpile(
         if name in skip:
             new_circuit.add(gate)
             continue
-        if native_flag is None:
+        if not native_flag:
             raise UnsupportedGateError(
                 f"Qibo gate {name} on qubits {gate.qubits} is not native to this "
                 f"machine, and no qibo.transpiler.unroller.NativeGates member is "
@@ -125,11 +129,31 @@ def default_transpile(
             raise UnsupportedGateError(
                 f"Qibo gate {name} on qubits {gate.qubits} is not native to this "
                 f"machine, and Qibo's transpiler has no decomposition rule for it "
-                f"into this machine's native gate set ({sorted(targets)}). "
+                f"into this machine's native gate set ({native_flag}). "
                 f"Decompose it yourself first, or pass transpile=False and supply "
                 f"an already-native circuit."
             ) from exc
-        for decomposed_gate in decomposition if isinstance(decomposition, list) else [decomposition]:
+        decomposed_gates = decomposition if isinstance(decomposition, list) else [decomposition]
+        # translate_gate does not check its output against `native_flag`: its
+        # tables assume NativeGates.default() (notably Z) is available. Verify
+        # with Qibo's own check -- per decomposition, not on the whole circuit,
+        # since `skip` gates pass through unchanged by design -- so an
+        # unrunnable gate fails here rather than deep in the QUA compiler.
+        decomposed_circuit = QiboCircuit(circuit.nqubits)
+        decomposed_circuit.add(decomposed_gates)
+        try:
+            assert_decomposition(decomposed_circuit, native_flag)
+        except DecompositionError as exc:
+            raise UnsupportedGateError(
+                f"Qibo gate {name} on qubits {gate.qubits} is not native to this "
+                f"machine, and Qibo's transpiler decomposed it into "
+                f"{[type(g).__name__ for g in decomposed_gates]}, which is not "
+                f"native either ({str(exc).rstrip('.')}; native gate set: {native_flag}). Install "
+                f"the missing macro(s) on the QuAM machine (see add_basic_macros), "
+                f"decompose the gate yourself first, or pass transpile=False and "
+                f"supply an already-native circuit."
+            ) from exc
+        for decomposed_gate in decomposed_gates:
             new_circuit.add(decomposed_gate)
         decomposed_gate_names.append(name)
 

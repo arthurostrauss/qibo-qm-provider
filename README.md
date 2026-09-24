@@ -79,7 +79,8 @@ Qibo's per-gate measurement convention:
 | [`backend/symbolic_parameters.py`](qibo_qm_provider/backend/symbolic_parameters.py) | `sympy` expression → Qiskit `Parameter`, and parameter-name collision checks against the machine's installed operation names |
 | [`backend/parameter_table.py`](qibo_qm_provider/backend/parameter_table.py) (`QiboParameterTable`) | A Qibo-circuit source adapter for `qiskit_qm_provider.parameter_table.ParameterTable` — Qibo's counterpart of that class's existing `from_qiskit` |
 | [`backend/measurement_translation.py`](qibo_qm_provider/backend/measurement_translation.py) | Qiskit `Result` → Qibo `MeasurementOutcomes` |
-| [`quam_macros/superconducting/add_basic_macros.py`](qibo_qm_provider/quam_macros/superconducting/add_basic_macros.py) | Re-exports `qiskit_qm_provider`'s own macro installer unchanged, only unwrapping a `QiboQMBackend`/`QMBackend`/bare `QuamRoot` argument |
+| [`quam_macros/superconducting/single_qubit_macros.py`](qibo_qm_provider/quam_macros/superconducting/single_qubit_macros.py) | `GPI2Macro` (`rz(-phi)`, `sx`, `rz(phi)`) and `ZMacro` (`rz(pi)`), delegating to the qubit's existing macros |
+| [`quam_macros/superconducting/add_basic_macros.py`](qibo_qm_provider/quam_macros/superconducting/add_basic_macros.py) | Calls `qiskit_qm_provider`'s own macro installer (unwrapping a `QiboQMBackend`/`QMBackend`/bare `QuamRoot` argument), then adds `gpi2`/`z` macros built from `sx`/`rz` so Qibo's GPI2-based unroller can target the machine |
 
 `FluxTunableTransmonBackend` is a topology-specific `QiboQMBackend`
 subclass, same relationship to its wrapped `QMBackend` subclass.
@@ -180,7 +181,7 @@ theta = sympy.Symbol("theta")
 circuit = Circuit(1)
 circuit.add(gates.RZ(0, theta=theta))
 
-add_basic_macros(machine)                    # installs rz, x, sx, measure, ...
+add_basic_macros(machine)                    # installs rz, x, sx, gpi2, z, measure, ...
 backend = QiboQMBackend(machine)
 
 # Build the table up front so it can be declared/assigned inside the sweep,

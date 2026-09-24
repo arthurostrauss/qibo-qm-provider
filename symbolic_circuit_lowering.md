@@ -428,6 +428,9 @@ Both corrected in its docstring, both pinned by tests:
    `XPASS` with no other regressions. Installing the macro on the machine
    *before* constructing the backend remains the documented workaround either
    way. Not yet filed as an upstream `qm_qasm` issue.
+   **Update (2026-09-24): released in `qiskit-qm-provider` 0.3.5**, now this
+   package's dependency floor; the test above is a plain passing test and
+   overriding via `register_gate` works directly.
 
 ### Fixed: `sequence_to_qua_macro`'s `phase` hook
 
