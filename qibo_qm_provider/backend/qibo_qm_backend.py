@@ -108,7 +108,7 @@ class QiboQMBackend(NumpyBackend):
         ``qibo-qm-iqcc-<backend_name>`` folder's ``platform.py`` would call.
         """
         from qiskit_qm_provider.providers import IQCCProvider
-        from qiskit_qm_provider.quam_macros.superconducting import add_basic_macros
+        from qibo_qm_provider.quam_macros.superconducting import add_basic_macros
         provider = IQCCProvider(api_token=api_token)
         machine = provider.get_machine(backend_name, quam_state_folder_path=quam_state_folder_path, quam_cls=quam_cls)
         add_basic_macros(machine)
@@ -126,7 +126,7 @@ class QiboQMBackend(NumpyBackend):
         No ``$QIBOLAB_PLATFORMS`` folder registration required -- the
         native-Python entrypoint counterpart to ``from_iqcc``.
         """
-        from qiskit_qm_provider.quam_macros.superconducting import add_basic_macros
+        from qibo_qm_provider.quam_macros.superconducting import add_basic_macros
         from qiskit_qm_provider.providers import QMProvider
         provider = QMProvider(state_folder_path=state_path, quam_cls=quam_class)
         machine = provider.get_machine()
