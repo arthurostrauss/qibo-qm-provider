@@ -71,7 +71,7 @@ snapshot of it.
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from qibolab._core.components import AcquisitionChannel, Channel, Config, DcChannel, IqChannel
 from qibolab._core.components.configs import IqConfig
@@ -80,7 +80,8 @@ from qibolab._core.instruments.qm.components import MwFemOscillatorConfig, OpxOu
 from quam.components.channels import MWChannel, SingleChannel
 
 from ..exceptions import MissingQuamAttributeError, UnsupportedWiringError
-from .naming import channel_id, resolve_readout_pulse
+from .naming import channel_id
+from .quam_platforms import PulseFetcher, platform_class_for, resolve_single_qubit_pulse
 
 if TYPE_CHECKING:
     from quam.core import QuamRoot
@@ -154,23 +155,23 @@ def _check_sampling_rate(port, owner_label: str) -> None:
         )
 
 
-def _readout_pulse(qubit):
+def _readout_pulse(qubit, fetch: Optional[PulseFetcher] = None):
     """The QuAM readout ``Pulse`` used for shot threshold/rotation info,
-    resolved by the same :func:`~.naming.resolve_readout_pulse` that
-    ``quam_platform_conversion._single_qubit_natives`` uses for ``MZ``
-    (``qubit.get_pulse("readout")`` first, ``measure`` macro as fallback).
+    resolved exactly like the ``MZ`` native
+    (:func:`~.quam_platforms.resolve_single_qubit_pulse`: ``measure`` macro
+    first, then the platform class's ``fetch`` fallback).
 
-    Returns ``None`` if neither source yields a pulse (or the fallback
-    macro is broken), so acquisition channel *wiring* still succeeds without
-    readout calibration data -- wiring and native-gate installation are
-    independent concerns, and the broken macro is already reported by the
-    native-gate conversion.
+    Returns ``None`` if neither source yields a pulse (or the macro is
+    broken), so acquisition channel *wiring* still succeeds without readout
+    calibration data -- wiring and native-gate installation are independent
+    concerns, and the broken macro is already reported by the native-gate
+    conversion.
     """
     try:
-        resolved = resolve_readout_pulse(qubit)
+        resolved = resolve_single_qubit_pulse(qubit, "MZ", fetch)
     except MissingQuamAttributeError:
         return None
-    return None if resolved is None else resolved[1]
+    return None if resolved is None else resolved[2]
 
 
 def _flux_offset(flux_line) -> float:
@@ -271,7 +272,9 @@ def _wire_twpa(twpa, channels: dict, configs: dict, fems: dict) -> None:
         )
 
 
-def _wire_probe_and_acquisition(qubit, channels: dict, configs: dict, fems: dict) -> None:
+def _wire_probe_and_acquisition(
+    qubit, channels: dict, configs: dict, fems: dict, fetch: Optional[PulseFetcher] = None
+) -> None:
     resonator = qubit.resonator
     if not isinstance(resonator, MWChannel):
         raise UnsupportedWiringError(
@@ -305,7 +308,7 @@ def _wire_probe_and_acquisition(qubit, channels: dict, configs: dict, fems: dict
     in_device, in_path = _device(in_port, f"qubit {qubit.id!r} acquisition"), _path(in_port)
     channels[acq_id] = AcquisitionChannel(device=in_device, path=in_path, probe=probe_id)
 
-    ro = _readout_pulse(qubit)
+    ro = _readout_pulse(qubit, fetch)
     threshold = getattr(ro, "threshold", None) if ro is not None else None
     iq_angle = getattr(ro, "integration_weights_angle", None) if ro is not None else None
     if ro is not None:
@@ -398,12 +401,13 @@ def build_qm_wiring(
     configs: dict[str, Config] = {}
     fems: dict[str, str] = {}
 
+    fetch = platform_class_for(machine).fetch_single_qubit_pulse
     for name in machine.active_qubit_names:
         qubit = machine.qubits[name]
         if getattr(qubit, "xy", None) is not None:
             _wire_drive(qubit, channels, configs, fems)
         if getattr(qubit, "resonator", None) is not None:
-            _wire_probe_and_acquisition(qubit, channels, configs, fems)
+            _wire_probe_and_acquisition(qubit, channels, configs, fems, fetch)
         if getattr(qubit, "z", None) is not None:
             _wire_flux(channel_id(name, "flux"), qubit.z, channels, configs, fems, owner_label=f"qubit {name!r} flux")
 

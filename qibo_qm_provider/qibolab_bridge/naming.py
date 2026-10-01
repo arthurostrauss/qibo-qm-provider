@@ -16,20 +16,12 @@ entirely (folder resolution vs. per-machine channel/native addressing).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Iterator, Optional, Tuple
-
-from ..exceptions import MissingQuamAttributeError
+from typing import TYPE_CHECKING, Iterator, Tuple
 
 if TYPE_CHECKING:
     from quam.core import QuamRoot
 
-__all__ = ["channel_id", "resolve_channel", "iter_channels", "resolve_readout_pulse", "READOUT_PULSE_NAME"]
-
-# QuAM's readout-operation name, which quam_builder always registers on
-# each qubit's resonator. QuAM is the source of truth here, so this is fixed
-# rather than configurable; a different convention means a custom QuAM and
-# a platform built from it.
-READOUT_PULSE_NAME = "readout"
+__all__ = ["channel_id", "resolve_channel", "iter_channels"]
 
 # Single-/two-qubit macro name <-> qibolab native-gate field. Both
 # directions (`import_qibolab_natives_as_macros`, `quam_platform_conversion`)
@@ -83,62 +75,6 @@ def resolve_channel(machine: "QuamRoot", channel_id_: str):
     if attr is None:
         raise ValueError(f"{channel_id_!r}: {role!r} is not a recognized qubit channel role.")
     return getattr(machine.qubits[owner_name], attr)
-
-
-def resolve_readout_pulse(qubit) -> Optional[Tuple[str, object]]:
-    """Resolve a QuAM qubit's readout ``Pulse`` as ``(operation_name, pulse)``.
-
-    Single resolver shared by native-gate export (``MZ``, in
-    ``quam_platform_conversion``) and acquisition wiring (threshold/
-    ``iq_angle``, in ``quam_wiring``), so both always agree on which pulse
-    *is* the readout.
-
-    Resolution order:
-
-    1. ``qubit.get_pulse(READOUT_PULSE_NAME)`` (``"readout"``) -- the
-       pulse-level QuAM convention. This works whether or not the user
-       installed macros at all: a machine whose readout lives only in
-       ``resonator.operations`` still exports an ``MZ`` native.
-    2. Only if (1) finds nothing usable -- no such pulse, a non-unique name
-       across channels, or a match that is not on ``qubit.resonator`` --
-       the ``measure`` macro's ``.pulse`` reference, for setups that name
-       their readout operation differently and point the macro at it.
-
-    Either way the pulse must live on ``qubit.resonator``: qibolab's
-    ``Readout`` plays its probe on the probe (resonator) channel, so a
-    same-named pulse on any other channel is not a readout.
-
-    Returns ``None`` if the qubit has no resonator or neither source yields
-    a pulse.
-
-    Raises:
-        MissingQuamAttributeError: If the ``measure`` macro (fallback path)
-            references a pulse that is not in ``resonator.operations`` --
-            a broken macro, surfaced rather than silently dropped.
-    """
-    resonator = getattr(qubit, "resonator", None)
-    if resonator is None:
-        return None
-
-    try:
-        pulse = qubit.get_pulse(READOUT_PULSE_NAME)
-    except ValueError:
-        pulse = None
-    if pulse is not None and pulse.channel is resonator:
-        return READOUT_PULSE_NAME, pulse
-
-    macro = (getattr(qubit, "macros", None) or {}).get("measure")
-    macro_pulse_name = getattr(macro, "pulse", None)
-    if macro_pulse_name is None:
-        return None
-    operations = getattr(resonator, "operations", None) or {}
-    if macro_pulse_name not in operations:
-        raise MissingQuamAttributeError(
-            f"Qubit {getattr(qubit, 'id', None)!r} has no {READOUT_PULSE_NAME!r} pulse on its "
-            f"resonator, and its 'measure' macro references pulse {macro_pulse_name!r}, "
-            f"which is not in resonator.operations ({sorted(operations)})."
-        )
-    return macro_pulse_name, operations[macro_pulse_name]
 
 
 def iter_channels(machine: "QuamRoot") -> Iterator[Tuple[str, object]]:

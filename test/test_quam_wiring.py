@@ -100,8 +100,8 @@ def test_acquisition_config_uses_readout_pulse_fields(mw_fem_machine):
 
 
 def test_acquisition_config_reads_readout_pulse_without_measure_macro(mw_fem_machine):
-    """threshold/iq_angle come from qubit.get_pulse("readout") -- the
-    measure macro is not required."""
+    """Without a measure macro, FluxTunableQuamPlatform's fallback supplies
+    threshold/iq_angle from the resonator's "readout" pulse."""
     qubit = mw_fem_machine.qubits["mw0"]
     del qubit.macros["measure"]
     _, configs, _ = build_qm_wiring(mw_fem_machine)
@@ -109,6 +109,19 @@ def test_acquisition_config_reads_readout_pulse_without_measure_macro(mw_fem_mac
 
     assert configs["mw0/acquisition"].threshold == pytest.approx(ro.threshold)
     assert configs["mw0/acquisition"].iq_angle == pytest.approx(ro.integration_weights_angle)
+
+
+def test_generic_platform_acquisition_needs_measure_macro(mw_fem_machine, monkeypatch):
+    """With the generic QuamPlatform (machine type unregistered), the
+    readout pulse is only found through the measure macro."""
+    from quam_builder.architecture.superconducting.qpu.flux_tunable_quam import FluxTunableQuam
+
+    from qibo_qm_provider.qibolab_bridge.quam_platforms import QUAM_PLATFORM_CLASSES
+
+    monkeypatch.delitem(QUAM_PLATFORM_CLASSES, FluxTunableQuam)
+    del mw_fem_machine.qubits["mw0"].macros["measure"]
+    _, configs, _ = build_qm_wiring(mw_fem_machine)
+    assert configs["mw0/acquisition"].threshold is None
 
 
 # ---------------------------------------------------------------------------
