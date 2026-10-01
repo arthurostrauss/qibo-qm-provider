@@ -24,12 +24,18 @@ for ``QiboQMPlatformBackend`` construction; it just cannot
 strings this module writes onto ``Qubit``/coupler entries, via the shared
 :mod:`qibo_qm_provider.qibolab_bridge.naming` grammar both modules use.
 
-Native gates are read from QuAM's high-level ``.macros`` dict (``x``,
-``sx``, ``measure``, ``cz`` -- installed by ``add_basic_macros`` or
-equivalent), not the raw per-channel ``.operations`` dict, for robustness
-to custom gate implementations. This reuses (inverted) the exact macro-name
-tables :mod:`qibo_qm_provider.qibolab_bridge.naming` defines, so both
-conversion directions stay consistent by construction.
+Gate natives (``RX``/``RX90``/``CZ``) are read from QuAM's high-level
+``.macros`` dict (``x``, ``sx``, ``cz`` -- installed by ``add_basic_macros``
+or equivalent), not the raw per-channel ``.operations`` dict, for
+robustness to custom gate implementations. This reuses (inverted) the exact
+macro-name tables :mod:`qibo_qm_provider.qibolab_bridge.naming` defines, so
+both conversion directions stay consistent by construction.
+
+Readout (``MZ``) is the exception: it is resolved pulse-first, via
+``qubit.get_pulse("readout")``, with the ``measure`` macro only as a
+fallback (:func:`~.naming.resolve_readout_pulse`). Users who drive QuAM
+without its macros still calibrate a readout pulse, and qibolab needs it to
+build any measurement at all.
 """
 
 from __future__ import annotations
@@ -43,7 +49,13 @@ from qibolab._core.pulses.pulse import Acquisition, Readout as QibolabReadout
 from qibolab._core.qubits import Qubit, QubitMap
 
 from ..exceptions import AmplitudeOutOfRangeError, MissingQuamAttributeError, UnsupportedEnvelopeError
-from .naming import MACRO_NAME_TO_SINGLE_QUBIT_NATIVE, MACRO_NAME_TO_TWO_QUBIT_NATIVE, channel_id
+from .naming import (
+    DEFAULT_READOUT_PULSE_NAME,
+    MACRO_NAME_TO_SINGLE_QUBIT_NATIVE,
+    MACRO_NAME_TO_TWO_QUBIT_NATIVE,
+    channel_id,
+    resolve_readout_pulse,
+)
 from .quam_pulses import max_voltage_for_channel, quam_envelope_to_qibolab_pulse
 
 if TYPE_CHECKING:
@@ -107,11 +119,20 @@ def _build_couplers(machine: "QuamRoot") -> QubitMap:
     return couplers
 
 
-def _single_qubit_natives(quam_qubit) -> SingleQubitNatives:
-    """Build ``SingleQubitNatives`` for one QuAM qubit from its ``.macros``.
+def _single_qubit_natives(
+    quam_qubit, readout_pulse_name: str = DEFAULT_READOUT_PULSE_NAME
+) -> SingleQubitNatives:
+    """Build ``SingleQubitNatives`` for one QuAM qubit.
 
-    Only macros exposing a ``.pulse: str`` reference (``PulseMacro`` for
-    ``x``/``sx``, ``MeasureMacro`` for ``measure``) can be converted --
+    ``MZ`` is resolved pulse-first: ``quam_qubit.get_pulse(readout_pulse_name)``
+    (default ``"readout"``) on the resonator, falling back to the
+    ``measure`` macro's pulse only when no such pulse exists (see
+    :func:`~.naming.resolve_readout_pulse`) -- so a machine whose readout is
+    calibrated in ``resonator.operations`` but which never had macros
+    installed still exports a working ``MZ``.
+
+    ``RX``/``RX90`` are read from the ``x``/``sx`` macros. Only macros
+    exposing a ``.pulse: str`` reference (``PulseMacro``) can be converted --
     macros with no pulse reference (``VirtualZMacro`` for ``rz``,
     ``DelayMacro``, ``IdMacro``, ``ResetMacro``) contribute no calibrated
     Native entry, since qibolab's ``SingleQubitNatives`` has no field for
@@ -133,29 +154,36 @@ def _single_qubit_natives(quam_qubit) -> SingleQubitNatives:
     macros = getattr(quam_qubit, "macros", None) or {}
     fields: dict = {}
     for macro_name, native_field in MACRO_NAME_TO_SINGLE_QUBIT_NATIVE.items():
-        macro = macros.get(macro_name)
-        pulse_name = getattr(macro, "pulse", None)
-        if pulse_name is None:
-            continue
-
         is_measure = native_field == "MZ"
-        channel = quam_qubit.resonator if is_measure else quam_qubit.xy
-        if channel is None:
-            continue
-        if pulse_name not in channel.operations:
-            raise MissingQuamAttributeError(
-                f"Qubit {quam_qubit.id!r} macro {macro_name!r} references pulse "
-                f"{pulse_name!r}, which is not in "
-                f"{'resonator' if is_measure else 'xy'}.operations "
-                f"({sorted(channel.operations)})."
-            )
-        quam_pulse = channel.operations[pulse_name]
+        if is_measure:
+            # Pulse-first, macro only as fallback -- see resolve_readout_pulse.
+            resolved = resolve_readout_pulse(quam_qubit, readout_pulse_name)
+            if resolved is None:
+                continue
+            pulse_name, quam_pulse = resolved
+            channel = quam_qubit.resonator
+        else:
+            macro = macros.get(macro_name)
+            pulse_name = getattr(macro, "pulse", None)
+            if pulse_name is None:
+                continue
+            channel = quam_qubit.xy
+            if channel is None:
+                continue
+            if pulse_name not in channel.operations:
+                raise MissingQuamAttributeError(
+                    f"Qubit {quam_qubit.id!r} macro {macro_name!r} references pulse "
+                    f"{pulse_name!r}, which is not in xy.operations "
+                    f"({sorted(channel.operations)})."
+                )
+            quam_pulse = channel.operations[pulse_name]
         try:
             pulse = quam_envelope_to_qibolab_pulse(quam_pulse, max_voltage_for_channel(channel))
         except (AmplitudeOutOfRangeError, UnsupportedEnvelopeError) as exc:
+            source = f"pulse {pulse_name!r}" if is_measure else f"macro {macro_name!r}, pulse {pulse_name!r}"
             warnings.warn(
-                f"Qubit {quam_qubit.id!r}: native {native_field!r} (macro {macro_name!r}, "
-                f"pulse {pulse_name!r}) could not be converted to a qibolab Pulse -- "
+                f"Qubit {quam_qubit.id!r}: native {native_field!r} ({source}) "
+                f"could not be converted to a qibolab Pulse -- "
                 f"omitting only this native gate for this qubit. {exc}",
                 stacklevel=2,
             )
@@ -218,10 +246,15 @@ def _two_qubit_natives(pair) -> TwoQubitNatives:
     return TwoQubitNatives(**fields)
 
 
-def _build_native_gates(machine: "QuamRoot") -> NativeGates:
-    """Build qibolab ``NativeGates`` (single- and two-qubit) from QuAM macros."""
+def _build_native_gates(
+    machine: "QuamRoot", readout_pulse_name: str = DEFAULT_READOUT_PULSE_NAME
+) -> NativeGates:
+    """Build qibolab ``NativeGates`` (single- and two-qubit) from QuAM
+    macros/pulses -- ``readout_pulse_name`` is forwarded to
+    :func:`_single_qubit_natives` for ``MZ`` resolution."""
     single_qubit = {
-        name: _single_qubit_natives(machine.qubits[name]) for name in machine.active_qubit_names
+        name: _single_qubit_natives(machine.qubits[name], readout_pulse_name)
+        for name in machine.active_qubit_names
     }
     two_qubit = {
         pair_name: _two_qubit_natives(machine.qubit_pairs[pair_name])

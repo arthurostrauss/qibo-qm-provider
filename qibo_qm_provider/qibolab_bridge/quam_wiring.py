@@ -79,8 +79,8 @@ from qibolab._core.components.filters import ExponentialFilter, FiniteImpulseRes
 from qibolab._core.instruments.qm.components import MwFemOscillatorConfig, OpxOutputConfig, QmAcquisitionConfig
 from quam.components.channels import MWChannel, SingleChannel
 
-from ..exceptions import UnsupportedWiringError
-from .naming import channel_id
+from ..exceptions import MissingQuamAttributeError, UnsupportedWiringError
+from .naming import DEFAULT_READOUT_PULSE_NAME, channel_id, resolve_readout_pulse
 
 if TYPE_CHECKING:
     from quam.core import QuamRoot
@@ -154,20 +154,23 @@ def _check_sampling_rate(port, owner_label: str) -> None:
         )
 
 
-def _readout_pulse(qubit):
+def _readout_pulse(qubit, readout_pulse_name: str = DEFAULT_READOUT_PULSE_NAME):
     """The QuAM readout ``Pulse`` used for shot threshold/rotation info,
-    resolved via the ``measure`` macro (mirrors
-    ``quam_platform_conversion._single_qubit_natives``).
+    resolved by the same :func:`~.naming.resolve_readout_pulse` that
+    ``quam_platform_conversion._single_qubit_natives`` uses for ``MZ``
+    (``qubit.get_pulse("readout")`` first, ``measure`` macro as fallback).
 
-    Returns ``None`` if no ``measure`` macro is installed, so acquisition
-    channel *wiring* still succeeds without native-gate readout calibration
-    data -- wiring and native-gate installation are independent concerns.
+    Returns ``None`` if neither source yields a pulse (or the fallback
+    macro is broken), so acquisition channel *wiring* still succeeds without
+    readout calibration data -- wiring and native-gate installation are
+    independent concerns, and the broken macro is already reported by the
+    native-gate conversion.
     """
-    macro = (getattr(qubit, "macros", None) or {}).get("measure")
-    pulse_name = getattr(macro, "pulse", None)
-    if pulse_name is None:
+    try:
+        resolved = resolve_readout_pulse(qubit, readout_pulse_name)
+    except MissingQuamAttributeError:
         return None
-    return qubit.resonator.operations.get(pulse_name)
+    return None if resolved is None else resolved[1]
 
 
 def _flux_offset(flux_line) -> float:
@@ -268,7 +271,9 @@ def _wire_twpa(twpa, channels: dict, configs: dict, fems: dict) -> None:
         )
 
 
-def _wire_probe_and_acquisition(qubit, channels: dict, configs: dict, fems: dict) -> None:
+def _wire_probe_and_acquisition(
+    qubit, channels: dict, configs: dict, fems: dict, readout_pulse_name: str = DEFAULT_READOUT_PULSE_NAME
+) -> None:
     resonator = qubit.resonator
     if not isinstance(resonator, MWChannel):
         raise UnsupportedWiringError(
@@ -302,7 +307,7 @@ def _wire_probe_and_acquisition(qubit, channels: dict, configs: dict, fems: dict
     in_device, in_path = _device(in_port, f"qubit {qubit.id!r} acquisition"), _path(in_port)
     channels[acq_id] = AcquisitionChannel(device=in_device, path=in_path, probe=probe_id)
 
-    ro = _readout_pulse(qubit)
+    ro = _readout_pulse(qubit, readout_pulse_name)
     threshold = getattr(ro, "threshold", None) if ro is not None else None
     iq_angle = getattr(ro, "integration_weights_angle", None) if ro is not None else None
     if ro is not None:
@@ -366,6 +371,7 @@ def _wire_flux(ch_id: str, flux_line, channels: dict, configs: dict, fems: dict,
 
 def build_qm_wiring(
     machine: "QuamRoot",
+    readout_pulse_name: str = DEFAULT_READOUT_PULSE_NAME,
 ) -> tuple[dict[str, Channel], dict[str, Config], dict[str, str]]:
     """Build ``channels``, ``configs``, and ``fems`` for
     ``Platform.channels``/``Platform.parameters.configs`` from a QuAM
@@ -382,6 +388,12 @@ def build_qm_wiring(
     ``Platform.couplers`` (derived independently from QuAM's qubit/pair
     graph). TWPA pump/isolation channels (see :func:`_wire_twpa`) are the one
     exception -- keyed ``{twpa.name}/{role}``, not owned by any qubit/pair.
+
+    ``readout_pulse_name`` selects the resonator pulse whose ``threshold``/
+    ``integration_weights_angle`` populate each acquisition config (see
+    :func:`_readout_pulse`) -- keep it equal to the one passed to
+    ``_build_native_gates`` so ``MZ`` and its acquisition config describe
+    the same pulse.
 
     Raises:
         UnsupportedWiringError: If any qubit/pair/TWPA uses wiring this
@@ -400,7 +412,7 @@ def build_qm_wiring(
         if getattr(qubit, "xy", None) is not None:
             _wire_drive(qubit, channels, configs, fems)
         if getattr(qubit, "resonator", None) is not None:
-            _wire_probe_and_acquisition(qubit, channels, configs, fems)
+            _wire_probe_and_acquisition(qubit, channels, configs, fems, readout_pulse_name)
         if getattr(qubit, "z", None) is not None:
             _wire_flux(channel_id(name, "flux"), qubit.z, channels, configs, fems, owner_label=f"qubit {name!r} flux")
 
