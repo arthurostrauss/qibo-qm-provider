@@ -14,6 +14,7 @@ import json
 import pytest
 from qibolab import Platform
 from qibolab._core.pulses.envelope import Gaussian, Rectangular
+from quam.components.macro import PulseMacro
 from quam.components.pulses import DragCosinePulse, GaussianPulse, SquarePulse
 
 from qibo_qm_provider.exceptions import AmplitudeOutOfRangeError, UnsupportedEnvelopeError
@@ -337,3 +338,50 @@ def test_create_iqcc_wraps_connection_error(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="arbel"):
         create_iqcc("qibo-qm-iqcc-arbel", state_path=str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# Per-port full-scale amplitude (MW-FEM vs LF-FEM)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("amplitude", [0.05, 0.4, 0.7, 1.0])
+def test_mw_fem_amplitude_exported_as_fraction_of_full_scale(mw_fem_machine, amplitude):
+    """MW-FEM waveforms are normalized to full_scale_power_dbm (full scale = 1),
+    so QuAM's amplitude already is the qibolab amplitude: exported 1:1, and
+    values in (0.5, 1] are valid rather than dropped as out of range (which
+    the previous 0.5 V assumption did)."""
+    mw_fem_machine.qubits["mw0"].resonator.operations["readout"].amplitude = amplitude
+    mw_fem_machine.qubits["mw0"].xy.operations["x180"].amplitude = amplitude
+    mw_fem_machine.qubits["mw0"].macros["x"] = PulseMacro(pulse="x180")
+
+    natives = _build_native_gates(mw_fem_machine).single_qubit["mw0"]
+    assert natives.MZ[0][1].probe.amplitude == pytest.approx(amplitude)
+    assert natives.RX[0][1].amplitude == pytest.approx(amplitude)
+
+
+def test_lf_fem_direct_amplitude_still_normalized_by_half_volt(mw_fem_machine):
+    """LF-FEM waveforms stay in volts: a direct-mode flux pulse of 0.1 V
+    exports as 0.1 / 0.5 V."""
+    from qibo_qm_provider.qibolab_bridge.quam_pulses import max_voltage_for_channel
+
+    z = mw_fem_machine.qubits["mw0"].z
+    assert max_voltage_for_channel(z) == 0.5
+    pulse = _quam_envelope_to_qibolab_pulse(z.operations["const"], max_voltage_for_channel(z))
+    assert pulse.amplitude == pytest.approx(0.2)
+
+
+def test_mw_fem_amplitude_round_trips_through_qibolab(mw_fem_machine):
+    """qibolab -> QuAM -> qibolab on an MW-FEM channel preserves the
+    amplitude and writes it to QuAM unscaled (fraction of full scale)."""
+    from qibolab._core.pulses.pulse import Pulse as QibolabPulse
+
+    from qibo_qm_provider.qibolab_bridge.quam_pulses import max_voltage_for_channel, quam_pulse_from_qibolab_pulse
+
+    xy = mw_fem_machine.qubits["mw0"].xy
+    qibolab_pulse = QibolabPulse(duration=40, amplitude=0.7, envelope=Rectangular())
+    quam_pulse = quam_pulse_from_qibolab_pulse(qibolab_pulse, "imported", max_voltage_for_channel(xy))
+    assert quam_pulse.amplitude == pytest.approx(0.7)
+    xy.operations["imported"] = quam_pulse
+    back = _quam_envelope_to_qibolab_pulse(xy.operations["imported"], max_voltage_for_channel(xy))
+    assert back.amplitude == pytest.approx(0.7)
