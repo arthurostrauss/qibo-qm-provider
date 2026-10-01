@@ -7,12 +7,16 @@ OpenQASM/QuAM-macro backend), and ``qua_macros.py`` (qibolab -> QuAM, for
 the QUA-macro emitter). Split out so both directions of envelope conversion
 exist exactly once, with one shared, reconciled amplitude-unit convention.
 
-Amplitude units: QuAM ``Pulse`` amplitudes are volts; qibolab ``Pulse``
-amplitudes are dimensionless, normalized to roughly ``[-1, 1]`` (qibolab
-re-multiplies by the channel's maximum output voltage at playback time --
-see ``qibolab._core.instruments.qm.controller.channel_max_voltage``). Both
+Amplitude units: QuAM ``Pulse`` amplitudes are the raw QM waveform values
+-- volts on LF-FEM/OPX+ ports, but a *fraction of full scale*
+(``full_scale_power_dbm``, full scale = 1) on MW-FEM ports. qibolab
+``Pulse`` amplitudes are dimensionless, normalized to ``[-1, 1]`` of the
+port's full scale (qibolab re-multiplies by it at playback time -- see
+``qibolab._core.instruments.qm.controller.channel_max_voltage``). Both
 conversion directions here go through the same ``max_voltage`` divide/
-multiply, so a pulse converted one way and back preserves its real voltage.
+multiply (see :func:`max_voltage_for_port`), so a pulse converted one way
+and back preserves its real output, and on MW-FEM ports the exported qibolab
+amplitude equals the QuAM amplitude.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import numpy as np
 from qibolab._core.pulses.envelope import Custom, Gaussian, Rectangular
 from qibolab._core.pulses.pulse import Pulse as QibolabPulse
 from qibolab._core.pulses.pulse import Readout as QibolabReadout
+from quam.components.ports import MWFEMAnalogOutputPort
 from quam.components.pulses import GaussianPulse, Pulse as QuamPulse, SquarePulse, SquareReadoutPulse, WaveformPulse
 
 from ..exceptions import AmplitudeOutOfRangeError, UnsupportedEnvelopeError
@@ -35,13 +40,18 @@ __all__ = [
     "quam_envelope_to_qibolab_pulse",
 ]
 
-# qibolab's own defaults (qibolab._core.instruments.qm.controller):
-# MAX_VOLTAGE = 0.5 for "direct" output_mode, MAX_VOLTAGE_AMPLIFIED = 2.5 for
-# "amplified". Duplicated here (rather than imported) because this module
-# converts amplitudes before any Controller/Config object exists to read
-# output_mode off of.
+# Full-scale waveform values per QM output port kind, matching
+# qibolab._core.instruments.qm.controller (MAX_VOLTAGE, MAX_VOLTAGE_AMPLIFIED,
+# MAX_AMPLITUDE_MW_FEM): LF-FEM/OPX+ waveforms are volts (+-0.5 V "direct",
+# +-2.5 V "amplified"); MW-FEM waveforms are normalized to the port's
+# full_scale_power_dbm, full scale = 1. Duplicated here (rather than
+# imported) because this module converts amplitudes before any Controller/
+# Config object exists, and because released qibolab versions predate the
+# MW-FEM constant (they treat MW-FEM ports as 0.5 V -- see
+# max_voltage_for_port).
 MAX_VOLTAGE_DIRECT = 0.5
 MAX_VOLTAGE_AMPLIFIED = 2.5
+MAX_AMPLITUDE_MW_FEM = 1.0
 
 # qibolab-native sampling convention used throughout this module: pulse
 # durations are in ns, and QM's FEM ports run at 1 GSa/s = 1 sample/ns, so
@@ -50,21 +60,33 @@ _SAMPLES_PER_NS = 1.0
 
 
 def max_voltage_for_port(port) -> float:
-    """Maximum output voltage (V) for a QuAM output port.
+    """Full-scale waveform value for a QuAM output port -- what a qibolab
+    amplitude of ``1`` corresponds to on it.
 
-    Mirrors qibolab's own ``channel_max_voltage``
-    (``qibolab._core.instruments.qm.controller``): ``2.5`` V for an LF-FEM/
-    OPX+ port with ``output_mode == "amplified"``, ``0.5`` V (QM's "direct"
-    mode) otherwise -- including MW-FEM ports (which have no ``output_mode``
-    field at all, since amplitude there is set via ``full_scale_power_dbm``
-    instead) and the synthetic test fixture's bare ``("con1", n)`` tuples
-    (``getattr`` on a tuple safely returns the default).
+    - MW-FEM (``MWFEMAnalogOutputPort``): ``1.0``. QM normalizes MW-FEM
+      waveforms to ``full_scale_power_dbm`` (``[-1, 1]``, 1 = full scale), so
+      QuAM's amplitude is already a fraction of full scale and is exported
+      unchanged.
+    - LF-FEM/OPX+ with ``output_mode == "amplified"``: ``2.5`` V.
+    - Anything else (``"direct"`` mode, OPX+, the synthetic test fixture's
+      bare ``("con1", n)`` tuples): ``0.5`` V.
+
+    Matches ``channel_max_voltage`` in qibolab's QM driver once that
+    resolves MW-FEM ports from their LO config. Released qibolab versions
+    instead treat MW-FEM ports as 0.5 V, which used to be mirrored here and
+    exported every MW-FEM amplitude at 2x its QuAM value (rejecting valid
+    amplitudes above 0.5). This package's own execution path
+    (``QuamQmController``) uses ``machine.generate_config()`` and never
+    applies qibolab's scaling, so it plays correctly either way.
     """
+    if isinstance(port, MWFEMAnalogOutputPort):
+        return MAX_AMPLITUDE_MW_FEM
     return MAX_VOLTAGE_AMPLIFIED if getattr(port, "output_mode", None) == "amplified" else MAX_VOLTAGE_DIRECT
 
 
 def max_voltage_for_channel(channel) -> float:
-    """Maximum output voltage (V) for a QuAM channel, single- or IQ-output.
+    """Full-scale waveform value for a QuAM channel, single- or IQ-output
+    (see :func:`max_voltage_for_port`).
 
     Reads ``channel.opx_output`` (``MWChannel``/``SingleChannel``, e.g.
     ``XYDriveMW``, ``FluxLine``) or, if absent, ``channel.opx_output_I``
@@ -80,8 +102,9 @@ def max_voltage_for_channel(channel) -> float:
 def _check_amplitude_in_range(amplitude: float, label: str, max_voltage: float, real_voltage: float) -> None:
     if abs(amplitude) > 1.0:
         raise AmplitudeOutOfRangeError(
-            f"{label} has amplitude {real_voltage} V, exceeding the channel's "
-            f"maximum output voltage of {max_voltage} V ({abs(amplitude):.3g}x)."
+            f"{label} has amplitude {real_voltage}, exceeding the channel's "
+            f"full-scale value of {max_voltage} ({abs(amplitude):.3g}x; volts on "
+            "LF-FEM/OPX+ ports, fraction of full_scale_power_dbm on MW-FEM ports)."
         )
 
 
@@ -198,8 +221,8 @@ def _generic_waveform_pulse(quam_pulse: QuamPulse, max_voltage: float = MAX_VOLT
         raise AmplitudeOutOfRangeError(
             f"QuAM pulse {getattr(quam_pulse, 'id', None)!r} of type "
             f"{type(quam_pulse).__name__!r} has a peak sample amplitude of "
-            f"{peak * max_voltage:.4g} V, exceeding the channel's maximum output "
-            f"voltage of {max_voltage} V ({peak:.3g}x)."
+            f"{peak * max_voltage:.4g}, exceeding the channel's full-scale value "
+            f"of {max_voltage} ({peak:.3g}x)."
         )
 
     return QibolabPulse(

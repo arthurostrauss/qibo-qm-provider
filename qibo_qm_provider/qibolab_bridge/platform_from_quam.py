@@ -39,6 +39,7 @@ from .iqcc_controller import IQCCQmController
 from .platform_naming import IqccSource, parse_platform_name
 from .quam_controller import QuamQmController
 from .quam_platform_conversion import _build_couplers, _build_native_gates, _build_qubits
+from .quam_platforms import QuamPlatform, platform_class_for
 from .quam_wiring import build_qm_wiring
 
 __all__ = ["create_iqcc", "create_local", "quam_to_qibolab_platform", "DEFAULT_QUAM_CLASS"]
@@ -183,11 +184,18 @@ def _build_qm_controller(machine: QuamRoot, *, port: Optional[int] = None):
     return controller, configs
 
 
-def quam_to_qibolab_platform(machine: QuamRoot, name: str, *, port: Optional[int] = None) -> Platform:
+def quam_to_qibolab_platform(machine: QuamRoot, name: str, *, port: Optional[int] = None) -> QuamPlatform:
     """Build a qibolab ``Platform`` from a QuAM object.
 
+    The returned object is an instance of the platform class registered for
+    ``machine``'s type (:func:`~.quam_platforms.platform_class_for`, e.g.
+    ``FluxTunableQuamPlatform`` for quam_builder's ``FluxTunableQuam``; the
+    generic ``QuamPlatform`` otherwise), which decides the single-qubit
+    native fallbacks used when macros are absent.
+
     Populates ``qubits``/``couplers`` (topology) and ``parameters.
-    native_gates`` (from QuAM's ``.macros``) in one pass -- see
+    native_gates`` (from QuAM's ``.macros``, then the platform class's
+    fallbacks) in one pass -- see
     ``quam_platform_conversion`` for the per-piece logic.
     ``parameters.settings.relaxation_time`` is set from
     ``machine.thermalization_time`` when available (best-effort; falls back
@@ -242,7 +250,8 @@ def quam_to_qibolab_platform(machine: QuamRoot, name: str, *, port: Optional[int
         )
 
     parameters = Parameters(settings=settings, configs=configs, native_gates=native_gates)
-    return Platform(name=name, parameters=parameters, instruments=instruments, qubits=qubits, couplers=couplers)
+    platform_cls = platform_class_for(machine)
+    return platform_cls(name=name, parameters=parameters, instruments=instruments, qubits=qubits, couplers=couplers)
 
 
 def _create_iqcc_with_machine(
