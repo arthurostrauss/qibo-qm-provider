@@ -36,7 +36,6 @@ from quam.core import QuamRoot
 
 from ..exceptions import MissingQuamAttributeError, UnsupportedWiringError
 from .iqcc_controller import IQCCQmController
-from .naming import DEFAULT_READOUT_PULSE_NAME
 from .platform_naming import IqccSource, parse_platform_name
 from .quam_controller import QuamQmController
 from .quam_platform_conversion import _build_couplers, _build_native_gates, _build_qubits
@@ -128,9 +127,7 @@ def _resolve_controller_class(machine: QuamRoot) -> type:
     return IQCCQmController if issubclass(qmm_class, CloudQuantumMachinesManager) else QuamQmController
 
 
-def _build_qm_controller(
-    machine: QuamRoot, *, port: Optional[int] = None, readout_pulse_name: str = DEFAULT_READOUT_PULSE_NAME
-):
+def _build_qm_controller(machine: QuamRoot, *, port: Optional[int] = None):
     """Build a qibolab ``QuamQmController`` (or ``IQCCQmController``) + matching
     ``configs`` from a QuAM object's wiring.
 
@@ -151,7 +148,6 @@ def _build_qm_controller(
             if present, else :data:`DEFAULT_QM_PORT` (with a warning, since a
             wrong guess here only surfaces as a failure at ``connect()``
             time, far from this call).
-        readout_pulse_name: Forwarded to ``quam_wiring.build_qm_wiring``.
 
     Raises:
         MissingQuamAttributeError: If ``machine.network`` has no ``"host"``.
@@ -175,7 +171,7 @@ def _build_qm_controller(
             stacklevel=3,
         )
 
-    channels, configs, fems = build_qm_wiring(machine, readout_pulse_name)
+    channels, configs, fems = build_qm_wiring(machine)
     controller_cls = _resolve_controller_class(machine)
     controller = controller_cls(
         address=f"{host}:{resolved_port}",
@@ -187,19 +183,11 @@ def _build_qm_controller(
     return controller, configs
 
 
-def quam_to_qibolab_platform(
-    machine: QuamRoot,
-    name: str,
-    *,
-    port: Optional[int] = None,
-    readout_pulse_name: str = DEFAULT_READOUT_PULSE_NAME,
-) -> Platform:
+def quam_to_qibolab_platform(machine: QuamRoot, name: str, *, port: Optional[int] = None) -> Platform:
     """Build a qibolab ``Platform`` from a QuAM object.
 
     Populates ``qubits``/``couplers`` (topology) and ``parameters.
-    native_gates`` (gates from QuAM's ``.macros``; ``MZ`` from each
-    qubit's ``get_pulse(readout_pulse_name)``, ``measure`` macro as
-    fallback) in one pass -- see
+    native_gates`` (from QuAM's ``.macros``) in one pass -- see
     ``quam_platform_conversion`` for the per-piece logic.
     ``parameters.settings.relaxation_time`` is set from
     ``machine.thermalization_time`` when available (best-effort; falls back
@@ -224,12 +212,6 @@ def quam_to_qibolab_platform(
             runs).
         port: Forwarded to :func:`_build_qm_controller` as a cluster-port
             override; see its docstring.
-        readout_pulse_name: Name of the resonator operation exported as
-            each qubit's ``MZ`` native and used for its acquisition
-            config's threshold/``iq_angle`` (default ``"readout"``, QuAM's
-            convention). Looked up via ``qubit.get_pulse``, so it works
-            without any macros installed; the ``measure`` macro is only
-            consulted when no such pulse exists.
 
     Returns:
         A qibolab ``Platform``, with working ``instruments`` when the
@@ -238,7 +220,7 @@ def quam_to_qibolab_platform(
     """
     qubits = _build_qubits(machine)
     couplers = _build_couplers(machine)
-    native_gates: NativeGates = _build_native_gates(machine, readout_pulse_name)
+    native_gates: NativeGates = _build_native_gates(machine)
 
     settings = Settings()
     try:
@@ -249,7 +231,7 @@ def quam_to_qibolab_platform(
     instruments: dict = {}
     configs: dict = {}
     try:
-        controller, configs = _build_qm_controller(machine, port=port, readout_pulse_name=readout_pulse_name)
+        controller, configs = _build_qm_controller(machine, port=port)
         instruments = {"qm": controller}
     except (UnsupportedWiringError, MissingQuamAttributeError) as exc:
         warnings.warn(

@@ -169,18 +169,6 @@ def test_mz_falls_back_to_measure_macro_pulse(add_basic_macros_installed):
     assert mz_readout.probe.amplitude == pytest.approx(0.1)
 
 
-def test_mz_custom_readout_pulse_name(dummy_machine):
-    """readout_pulse_name selects a differently named resonator pulse,
-    still without macros."""
-    resonator = dummy_machine.qubits["q0"].resonator
-    resonator.operations["ro_custom"] = SquarePulse(length=200, amplitude=0.05)
-
-    natives = _build_native_gates(dummy_machine, readout_pulse_name="ro_custom")
-    assert natives.single_qubit["q0"].MZ[0][1].probe.duration == 200
-    # q1 has no "ro_custom" and no macros -> no MZ, rather than an error.
-    assert natives.single_qubit["q1"].MZ is None
-
-
 def test_readout_named_pulse_off_resonator_is_not_mz(dummy_machine):
     """A "readout"-named pulse on a non-resonator channel is not a readout:
     qibolab plays a Readout's probe on the resonator."""

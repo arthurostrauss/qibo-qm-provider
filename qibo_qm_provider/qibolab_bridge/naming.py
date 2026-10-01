@@ -23,13 +23,13 @@ from ..exceptions import MissingQuamAttributeError
 if TYPE_CHECKING:
     from quam.core import QuamRoot
 
-__all__ = ["channel_id", "resolve_channel", "iter_channels", "resolve_readout_pulse", "DEFAULT_READOUT_PULSE_NAME"]
+__all__ = ["channel_id", "resolve_channel", "iter_channels", "resolve_readout_pulse", "READOUT_PULSE_NAME"]
 
-# QuAM's conventional readout-operation name (what quam_builder's
-# ReadoutResonator* components and calibration nodes register). Resolved
-# directly via `qubit.get_pulse(...)` by default -- see
-# `resolve_readout_pulse` for why the `measure` macro is only a fallback.
-DEFAULT_READOUT_PULSE_NAME = "readout"
+# QuAM's readout-operation name, which quam_builder always registers on
+# each qubit's resonator. QuAM is the source of truth here, so this is fixed
+# rather than configurable; a different convention means a custom QuAM and
+# a platform built from it.
+READOUT_PULSE_NAME = "readout"
 
 # Single-/two-qubit macro name <-> qibolab native-gate field. Both
 # directions (`import_qibolab_natives_as_macros`, `quam_platform_conversion`)
@@ -85,9 +85,7 @@ def resolve_channel(machine: "QuamRoot", channel_id_: str):
     return getattr(machine.qubits[owner_name], attr)
 
 
-def resolve_readout_pulse(
-    qubit, pulse_name: str = DEFAULT_READOUT_PULSE_NAME
-) -> Optional[Tuple[str, object]]:
+def resolve_readout_pulse(qubit) -> Optional[Tuple[str, object]]:
     """Resolve a QuAM qubit's readout ``Pulse`` as ``(operation_name, pulse)``.
 
     Single resolver shared by native-gate export (``MZ``, in
@@ -97,7 +95,7 @@ def resolve_readout_pulse(
 
     Resolution order:
 
-    1. ``qubit.get_pulse(pulse_name)`` (default ``"readout"``) -- the
+    1. ``qubit.get_pulse(READOUT_PULSE_NAME)`` (``"readout"``) -- the
        pulse-level QuAM convention. This works whether or not the user
        installed macros at all: a machine whose readout lives only in
        ``resonator.operations`` still exports an ``MZ`` native.
@@ -123,11 +121,11 @@ def resolve_readout_pulse(
         return None
 
     try:
-        pulse = qubit.get_pulse(pulse_name)
+        pulse = qubit.get_pulse(READOUT_PULSE_NAME)
     except ValueError:
         pulse = None
     if pulse is not None and pulse.channel is resonator:
-        return pulse_name, pulse
+        return READOUT_PULSE_NAME, pulse
 
     macro = (getattr(qubit, "macros", None) or {}).get("measure")
     macro_pulse_name = getattr(macro, "pulse", None)
@@ -136,7 +134,7 @@ def resolve_readout_pulse(
     operations = getattr(resonator, "operations", None) or {}
     if macro_pulse_name not in operations:
         raise MissingQuamAttributeError(
-            f"Qubit {getattr(qubit, 'id', None)!r} has no {pulse_name!r} pulse on its "
+            f"Qubit {getattr(qubit, 'id', None)!r} has no {READOUT_PULSE_NAME!r} pulse on its "
             f"resonator, and its 'measure' macro references pulse {macro_pulse_name!r}, "
             f"which is not in resonator.operations ({sorted(operations)})."
         )

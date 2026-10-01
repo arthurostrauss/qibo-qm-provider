@@ -50,7 +50,6 @@ from qibolab._core.qubits import Qubit, QubitMap
 
 from ..exceptions import AmplitudeOutOfRangeError, MissingQuamAttributeError, UnsupportedEnvelopeError
 from .naming import (
-    DEFAULT_READOUT_PULSE_NAME,
     MACRO_NAME_TO_SINGLE_QUBIT_NATIVE,
     MACRO_NAME_TO_TWO_QUBIT_NATIVE,
     channel_id,
@@ -119,13 +118,11 @@ def _build_couplers(machine: "QuamRoot") -> QubitMap:
     return couplers
 
 
-def _single_qubit_natives(
-    quam_qubit, readout_pulse_name: str = DEFAULT_READOUT_PULSE_NAME
-) -> SingleQubitNatives:
+def _single_qubit_natives(quam_qubit) -> SingleQubitNatives:
     """Build ``SingleQubitNatives`` for one QuAM qubit.
 
-    ``MZ`` is resolved pulse-first: ``quam_qubit.get_pulse(readout_pulse_name)``
-    (default ``"readout"``) on the resonator, falling back to the
+    ``MZ`` is resolved pulse-first: ``quam_qubit.get_pulse("readout")`` on
+    the resonator, falling back to the
     ``measure`` macro's pulse only when no such pulse exists (see
     :func:`~.naming.resolve_readout_pulse`) -- so a machine whose readout is
     calibrated in ``resonator.operations`` but which never had macros
@@ -157,7 +154,7 @@ def _single_qubit_natives(
         is_measure = native_field == "MZ"
         if is_measure:
             # Pulse-first, macro only as fallback -- see resolve_readout_pulse.
-            resolved = resolve_readout_pulse(quam_qubit, readout_pulse_name)
+            resolved = resolve_readout_pulse(quam_qubit)
             if resolved is None:
                 continue
             pulse_name, quam_pulse = resolved
@@ -246,15 +243,11 @@ def _two_qubit_natives(pair) -> TwoQubitNatives:
     return TwoQubitNatives(**fields)
 
 
-def _build_native_gates(
-    machine: "QuamRoot", readout_pulse_name: str = DEFAULT_READOUT_PULSE_NAME
-) -> NativeGates:
+def _build_native_gates(machine: "QuamRoot") -> NativeGates:
     """Build qibolab ``NativeGates`` (single- and two-qubit) from QuAM
-    macros/pulses -- ``readout_pulse_name`` is forwarded to
-    :func:`_single_qubit_natives` for ``MZ`` resolution."""
+    macros/pulses."""
     single_qubit = {
-        name: _single_qubit_natives(machine.qubits[name], readout_pulse_name)
-        for name in machine.active_qubit_names
+        name: _single_qubit_natives(machine.qubits[name]) for name in machine.active_qubit_names
     }
     two_qubit = {
         pair_name: _two_qubit_natives(machine.qubit_pairs[pair_name])
