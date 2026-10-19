@@ -894,6 +894,19 @@ desynchronize this converter's amplitude scaling from what qibolab's own
 driver does at pulse-registration time, trading a loud, honest failure for
 a silent, different one.
 
+**Update (2026-10): resolved.** Per QM's OPX1000 FEM docs, MW-FEM waveforms
+are not volts: they are normalized to `full_scale_power_dbm`, with full
+scale = 1 (no dBm-to-voltage conversion needed). qibolab's 0.5 V ceiling on
+MW-FEM was wrong, not a missing feature: it made every exported MW-FEM
+amplitude 2x its QuAM value and rejected valid amplitudes in (0.5, 1].
+`quam_pulses.max_voltage_for_port` now returns 1.0 for
+`MWFEMAnalogOutputPort` (QuAM amplitude == qibolab amplitude); LF-FEM/OPX+
+keep 0.5 V direct / 2.5 V amplified. The matching qibolab driver fix
+(`QmController.port_config`, which reads full scale and sampling rate from
+the MW-FEM LO config) lives on the `arthurostrauss/qibolab` fork. Our own
+execution path (`QuamQmController`) never used qibolab's scaling, so it
+played correctly before and after this change.
+
 **Live-hardware verification (`test/test_iqcc_platform_wiring.py`, 3 tests,
 all passing against real `"arbel"`, 2026-08-23):**
 

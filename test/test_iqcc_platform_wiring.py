@@ -14,27 +14,17 @@ the same physical ports, on real, 21-qubit, multi-bank production hardware
 No connection to real instruments is made anywhere in this file (``manager``
 is always ``None``); it only exercises config generation and compilation.
 
-**Real finding, confirmed while writing this file, not a bug in this
-converter:** installing macros and re-deriving native gates for the full
-21-qubit machine (``add_basic_macros`` + ``refresh()``) hits
-``AmplitudeOutOfRangeError`` for 7 of 21 qubits (``qA3``, ``qB5``, ``qC3``,
-``qC5``, ``qD3``, ``qD5``) -- their calibrated ``x180`` pulses have a peak
-voltage (0.51-0.88 V) exceeding qibolab's ``channel_max_voltage`` of 0.5 V.
-Traced to qibolab's own QM driver (``qibolab._core.instruments.qm.
-controller.channel_max_voltage``): it only special-cases an *LF-FEM*
-``output_mode == "amplified"`` config; every ``IqConfig``-configured channel
-(every MW-FEM drive/probe channel, on *any* rig) always gets the flat 0.5 V
-"direct" ceiling, regardless of that port's actual ``full_scale_power_dbm``
-(which genuinely varies per arbel port, -2 to +18 dBm) -- qibolab has no
-dBm-to-voltage conversion for MW-FEM at all. Given this, dividing by a
-higher, dBm-derived ceiling here would only desync this converter's scaling
-from what qibolab's own driver does at pulse-registration time, producing a
-*different*, silent amplitude mismatch instead of this loud, honest one;
-raising is the correct behavior pending an upstream qibolab fix. The wiring
-tests below (which do not depend on native-gate conversion) are unaffected
-and use a separate, macro-free fixture; only
-``test_compiles_real_native_gate_sequence_offline`` needs natives, and picks
-a qubit (``qA1``) confirmed to be within qibolab's assumed ceiling.
+**Historical finding, now fixed:** installing macros and re-deriving
+native gates for the full 21-qubit machine used to hit
+``AmplitudeOutOfRangeError`` for 6 of 21 qubits (``qA3``, ``qB5``, ``qC3``,
+``qC5``, ``qD3``, ``qD5``; calibrated ``x180`` amplitudes 0.51-0.88). The
+converter mirrored qibolab's ``channel_max_voltage``, which treats every
+MW-FEM channel as a 0.5 V port -- but QM normalizes MW-FEM waveforms to
+``full_scale_power_dbm`` with full scale = 1, so those amplitudes were
+valid. ``quam_pulses.max_voltage_for_port`` now uses 1.0 for MW-FEM ports
+(QuAM amplitude == qibolab amplitude). The wiring tests below do not depend
+on native-gate conversion and use a macro-free fixture; only
+``test_compiles_real_native_gate_sequence_offline`` needs natives.
 
 Requires IQCC cloud credentials/access (see ``qiskit_qm_provider.IQCCProvider``)
 and ``QUAM_STATE_PATH``. Skipped automatically otherwise. Run explicitly with::
@@ -57,9 +47,7 @@ BACKEND_NAME = "arbel"
 # physical MW-FEM readout ports, not just one.
 _REPRESENTATIVE_QUBITS = ["qA1", "qB1", "qC1", "qD1"]
 
-# Confirmed (see module docstring) to be within qibolab's assumed 0.5 V
-# direct-mode ceiling -- safe to use for the one test that needs a real,
-# fully-converted native-gate pulse.
+# The qubit whose calibrated RX native the compile test uses.
 _QUBIT_WITHIN_VOLTAGE_CEILING = "qA1"
 
 
@@ -150,10 +138,8 @@ def test_compiles_real_native_gate_sequence_offline(backend):
     Builds that one qubit's native via
     ``quam_platform_conversion._single_qubit_natives`` directly (rather than
     ``platform.natives``, which would require ``add_basic_macros`` +
-    ``backend.refresh()`` across the *whole* machine -- and, per the module
-    docstring, 6 *other* qubits currently raise ``AmplitudeOutOfRangeError``
-    during that whole-machine pass, unrelated to whether ``qA1`` itself is
-    fine). This isolates the check to exactly the qubit under test.
+    ``backend.refresh()`` across the *whole* machine). This isolates the
+    check to exactly the qubit under test.
 
     Two checks, both now meaningful for a different reason than before the
     Option-A convergence:
@@ -183,14 +169,14 @@ def test_compiles_real_native_gate_sequence_offline(backend):
     from qibolab._core.sequence import PulseSequence
 
     from qibo_qm_provider.qibolab_bridge.quam_platform_conversion import _single_qubit_natives
+    from qibo_qm_provider.qibolab_bridge.quam_pulses import max_voltage_for_channel
 
     qubit_id = _QUBIT_WITHIN_VOLTAGE_CEILING
     quam_qubit = backend.machine.qubits[qubit_id]
     # add_basic_macros only accepts a QuamRoot/QMBackend, not a bare qubit --
     # install macros on the whole machine (cheap: it only touches Python
     # objects, no wiring/network access), then build just this qubit's
-    # native directly rather than the whole machine's (see module docstring:
-    # the whole-machine pass currently fails for 6 other qubits).
+    # native directly rather than the whole machine's.
     add_basic_macros(backend.machine, reset_type="active", max_attempts=1)
 
     natives = _single_qubit_natives(quam_qubit)
@@ -226,7 +212,8 @@ def test_compiles_real_native_gate_sequence_offline(backend):
     # `sampling_rate=1`, giving `samples == duration` since duration is already
     # expressed in ns == samples at 1 GSa/s.
     envelope = np.asarray(rx_pulse.i(1)) + 1j * np.asarray(rx_pulse.q(1))
-    qibolab_peak_voltage = float(np.max(np.abs(envelope))) * 0.5  # direct-mode MW-FEM max_voltage
+    # MW-FEM full scale is 1 (fraction of full_scale_power_dbm), not 0.5 V.
+    qibolab_peak_voltage = float(np.max(np.abs(envelope))) * max_voltage_for_channel(quam_qubit.xy)
 
     quam_waveform = np.asarray(quam_qubit.xy.operations["x180"].calculate_waveform(), dtype=complex)
     quam_peak_voltage = float(np.max(np.abs(quam_waveform)))

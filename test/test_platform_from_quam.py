@@ -14,10 +14,18 @@ import json
 import pytest
 from qibolab import Platform
 from qibolab._core.pulses.envelope import Gaussian, Rectangular
+from quam.components.macro import PulseMacro
+from quam_builder.architecture.superconducting.qpu.flux_tunable_quam import FluxTunableQuam
 from quam.components.pulses import DragCosinePulse, GaussianPulse, SquarePulse
 
 from qibo_qm_provider.exceptions import AmplitudeOutOfRangeError, UnsupportedEnvelopeError
 from qibo_qm_provider.qibolab_bridge.platform_from_quam import create_iqcc, create_local, quam_to_qibolab_platform
+from qibo_qm_provider.qibolab_bridge.quam_platforms import (
+    QUAM_PLATFORM_CLASSES,
+    FluxTunableQuamPlatform,
+    QuamPlatform,
+    platform_class_for,
+)
 from qibo_qm_provider.qibolab_bridge.quam_platform_conversion import (
     _build_couplers,
     _build_native_gates,
@@ -130,6 +138,70 @@ def test_native_gates_match_quam_pulse_fields(add_basic_macros_installed):
     assert mz_readout.probe.amplitude == pytest.approx(0.2)
 
 
+def test_flux_tunable_natives_fetched_without_macros(dummy_machine):
+    """No macros on a FluxTunableQuam: FluxTunableQuamPlatform falls back to
+    quam_builder's operation names -- x180 (RX), x90 (RX90) on xy, readout
+    (MZ) on the resonator. Amplitudes are /0.5 V (bare-tuple ports)."""
+    assert not dummy_machine.qubits["q0"].macros
+    natives = _build_native_gates(dummy_machine).single_qubit["q0"]
+
+    assert natives.RX[0] == ("q0/drive", natives.RX[0][1])
+    assert natives.RX[0][1].amplitude == pytest.approx(0.2)
+    assert natives.RX90[0][1].amplitude == pytest.approx(0.1)
+    mz_channel, mz_readout = natives.MZ[0]
+    assert mz_channel == "q0/acquisition"
+    assert mz_readout.probe.duration == 100
+
+
+def test_macros_take_priority_over_fetched_pulses(add_basic_macros_installed):
+    """When a macro exists it wins, even if it points away from the
+    quam_builder default pulse name."""
+    qubit = add_basic_macros_installed.qubits["q0"]
+    qubit.resonator.operations["readout_alt"] = SquarePulse(length=200, amplitude=0.05)
+    qubit.macros["measure"].pulse = "readout_alt"
+    qubit.xy.operations["x180_alt"] = SquarePulse(length=60, amplitude=0.15)
+    qubit.macros["x"].pulse = "x180_alt"
+
+    natives = _build_native_gates(add_basic_macros_installed).single_qubit["q0"]
+    assert natives.MZ[0][1].probe.duration == 200
+    assert natives.RX[0][1].duration == 60
+
+
+def test_generic_platform_without_macros_has_no_natives(dummy_machine, monkeypatch):
+    """An unregistered machine type gets the generic QuamPlatform, which
+    assumes nothing about pulse names: no macros means no natives."""
+    monkeypatch.delitem(QUAM_PLATFORM_CLASSES, FluxTunableQuam)
+    assert platform_class_for(dummy_machine) is QuamPlatform
+
+    natives = _build_native_gates(dummy_machine).single_qubit["q0"]
+    assert natives.RX is None and natives.RX90 is None and natives.MZ is None
+
+
+def test_generic_platform_converts_macros(add_basic_macros_installed, monkeypatch):
+    monkeypatch.delitem(QUAM_PLATFORM_CLASSES, FluxTunableQuam)
+    natives = _build_native_gates(add_basic_macros_installed).single_qubit["q0"]
+    assert natives.RX is not None and natives.RX90 is not None and natives.MZ is not None
+
+
+def test_fetched_pulse_off_its_channel_is_ignored(dummy_machine):
+    """A "readout"-named pulse on a non-resonator channel is not a readout:
+    qibolab plays a Readout's probe on the resonator."""
+    qubit = dummy_machine.qubits["q0"]
+    del qubit.resonator.operations["readout"]
+    qubit.xy.operations["readout"] = SquarePulse(length=100, amplitude=0.1)
+
+    assert _build_native_gates(dummy_machine).single_qubit["q0"].MZ is None
+
+
+def test_platform_class_for_resolves_through_mro(dummy_machine):
+    class CustomFluxTunableQuam(FluxTunableQuam):
+        pass
+
+    assert platform_class_for(dummy_machine) is FluxTunableQuamPlatform
+    assert platform_class_for(CustomFluxTunableQuam()) is FluxTunableQuamPlatform
+    assert platform_class_for(object()) is QuamPlatform
+
+
 def test_rz_macro_contributes_no_native(add_basic_macros_installed):
     """VirtualZMacro (rz) has no .pulse reference -- qibolab's
     SingleQubitNatives has no RZ field either (virtual-Z is a compiler-level
@@ -152,7 +224,7 @@ def test_out_of_range_macro_only_drops_its_own_native(add_basic_macros_installed
     """
     add_basic_macros_installed.qubits["q0"].xy.operations["x180"].amplitude = 0.6
 
-    with pytest.warns(UserWarning, match=r"Qubit 'q0'.*native 'RX'.*macro 'x'") as record:
+    with pytest.warns(UserWarning, match=r"Qubit 'q0'.*native 'RX'.*pulse 'x180'") as record:
         natives = _build_native_gates(add_basic_macros_installed)
 
     assert not any("RX90" in str(w.message) for w in record.list)
@@ -190,6 +262,7 @@ def test_quam_to_qibolab_platform_builds_full_topology(add_basic_macros_installe
     with pytest.warns(UserWarning, match="Could not build QmController"):
         platform = quam_to_qibolab_platform(add_basic_macros_installed, name="qibo-qm-local")
 
+    assert isinstance(platform, FluxTunableQuamPlatform)
     assert isinstance(platform, Platform)
     assert platform.name == "qibo-qm-local"
     assert platform.nqubits == 2
@@ -277,3 +350,50 @@ def test_create_iqcc_wraps_connection_error(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="arbel"):
         create_iqcc("qibo-qm-iqcc-arbel", state_path=str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# Per-port full-scale amplitude (MW-FEM vs LF-FEM)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("amplitude", [0.05, 0.4, 0.7, 1.0])
+def test_mw_fem_amplitude_exported_as_fraction_of_full_scale(mw_fem_machine, amplitude):
+    """MW-FEM waveforms are normalized to full_scale_power_dbm (full scale = 1),
+    so QuAM's amplitude already is the qibolab amplitude: exported 1:1, and
+    values in (0.5, 1] are valid rather than dropped as out of range (which
+    the previous 0.5 V assumption did)."""
+    mw_fem_machine.qubits["mw0"].resonator.operations["readout"].amplitude = amplitude
+    mw_fem_machine.qubits["mw0"].xy.operations["x180"].amplitude = amplitude
+    mw_fem_machine.qubits["mw0"].macros["x"] = PulseMacro(pulse="x180")
+
+    natives = _build_native_gates(mw_fem_machine).single_qubit["mw0"]
+    assert natives.MZ[0][1].probe.amplitude == pytest.approx(amplitude)
+    assert natives.RX[0][1].amplitude == pytest.approx(amplitude)
+
+
+def test_lf_fem_direct_amplitude_still_normalized_by_half_volt(mw_fem_machine):
+    """LF-FEM waveforms stay in volts: a direct-mode flux pulse of 0.1 V
+    exports as 0.1 / 0.5 V."""
+    from qibo_qm_provider.qibolab_bridge.quam_pulses import max_voltage_for_channel
+
+    z = mw_fem_machine.qubits["mw0"].z
+    assert max_voltage_for_channel(z) == 0.5
+    pulse = _quam_envelope_to_qibolab_pulse(z.operations["const"], max_voltage_for_channel(z))
+    assert pulse.amplitude == pytest.approx(0.2)
+
+
+def test_mw_fem_amplitude_round_trips_through_qibolab(mw_fem_machine):
+    """qibolab -> QuAM -> qibolab on an MW-FEM channel preserves the
+    amplitude and writes it to QuAM unscaled (fraction of full scale)."""
+    from qibolab._core.pulses.pulse import Pulse as QibolabPulse
+
+    from qibo_qm_provider.qibolab_bridge.quam_pulses import max_voltage_for_channel, quam_pulse_from_qibolab_pulse
+
+    xy = mw_fem_machine.qubits["mw0"].xy
+    qibolab_pulse = QibolabPulse(duration=40, amplitude=0.7, envelope=Rectangular())
+    quam_pulse = quam_pulse_from_qibolab_pulse(qibolab_pulse, "imported", max_voltage_for_channel(xy))
+    assert quam_pulse.amplitude == pytest.approx(0.7)
+    xy.operations["imported"] = quam_pulse
+    back = _quam_envelope_to_qibolab_pulse(xy.operations["imported"], max_voltage_for_channel(xy))
+    assert back.amplitude == pytest.approx(0.7)
